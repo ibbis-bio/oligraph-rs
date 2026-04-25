@@ -169,6 +169,44 @@ fn rc_bytes(seq: &[u8]) -> Vec<u8> {
         .collect()
 }
 
+struct UnionFind {
+    parent: Vec<u32>,
+    rank: Vec<u8>,
+}
+
+impl UnionFind {
+    fn new(n: usize) -> Self {
+        UnionFind {
+            parent: (0..n as u32).collect(),
+            rank: vec![0; n],
+        }
+    }
+
+    fn find(&mut self, mut x: u32) -> u32 {
+        while self.parent[x as usize] != x {
+            self.parent[x as usize] = self.parent[self.parent[x as usize] as usize];
+            x = self.parent[x as usize];
+        }
+        x
+    }
+
+    fn union(&mut self, a: u32, b: u32) {
+        let ra = self.find(a);
+        let rb = self.find(b);
+        if ra == rb {
+            return;
+        }
+        if self.rank[ra as usize] < self.rank[rb as usize] {
+            self.parent[ra as usize] = rb;
+        } else if self.rank[ra as usize] > self.rank[rb as usize] {
+            self.parent[rb as usize] = ra;
+        } else {
+            self.parent[rb as usize] = ra;
+            self.rank[ra as usize] += 1;
+        }
+    }
+}
+
 // ============================================================
 // Build overlap graph
 // ============================================================
@@ -902,5 +940,15 @@ mod tests {
         assert_eq!(lines[4], ">2");
         assert_eq!(lines[5], "TTTTAAAA");
         assert_eq!(lines.len(), 6);
+    }
+
+    #[test]
+    fn union_find_basic() {
+        let mut uf = UnionFind::new(5);
+        uf.union(0, 1);
+        uf.union(2, 3);
+        uf.union(1, 3);
+        assert_eq!(uf.find(0), uf.find(3));
+        assert_ne!(uf.find(0), uf.find(4));
     }
 }
