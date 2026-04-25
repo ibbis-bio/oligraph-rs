@@ -422,10 +422,11 @@ fn parse_fasta(path: &str) -> std::io::Result<Vec<Vec<u8>>> {
 }
 
 fn usage() -> ! {
-    eprintln!("Usage: oligraph-rs <input.fasta> [output.gfa] [-l <min_overlap>]");
-    eprintln!("  input.fasta    Input FASTA file of sequences");
-    eprintln!("  output.gfa     Output GFA file (default: stdout)");
-    eprintln!("  -l <min>       Minimum overlap length (default: 20, max: 32)");
+    eprintln!("Usage: oligraph-rs <input.fasta> [output.gfa] [-l <min_overlap>] [--assembly-method <all|pca>]");
+    eprintln!("  input.fasta                Input FASTA file of sequences");
+    eprintln!("  output.gfa                 Output GFA file (default: stdout)");
+    eprintln!("  -l <min>                   Minimum overlap length (default: 20, max: 32)");
+    eprintln!("  --assembly-method <method>  Assembly method filter (default: all)");
     std::process::exit(1);
 }
 
@@ -438,6 +439,7 @@ fn main() {
     let mut fasta_path: Option<&str> = None;
     let mut gfa_path: Option<&str> = None;
     let mut l_min: u32 = 20;
+    let mut assembly_method = AssemblyMethod::All;
 
     let mut i = 1;
     while i < args.len() {
@@ -452,6 +454,21 @@ fn main() {
                     eprintln!("error: invalid value for -l: {}", args[i]);
                     usage();
                 });
+            }
+            "--assembly-method" => {
+                i += 1;
+                if i >= args.len() {
+                    eprintln!("error: --assembly-method requires a value");
+                    usage();
+                }
+                assembly_method = match args[i].as_str() {
+                    "all" => AssemblyMethod::All,
+                    "pca" => AssemblyMethod::Pca,
+                    _ => {
+                        eprintln!("error: unknown assembly method '{}' (expected: all, pca)", args[i]);
+                        usage();
+                    }
+                };
             }
             "-" | "--" => {
                 eprintln!("error: unknown flag: {}", args[i]);
@@ -500,15 +517,19 @@ fn main() {
     }
 
     eprintln!(
-        "loaded {} sequences (lengths {}-{}) with l_min={}",
+        "loaded {} sequences (lengths {}-{}) with l_min={}, assembly_method={}",
         seqs.len(),
         seqs.iter().map(|s| s.len()).min().unwrap(),
         max_len,
-        l_min
+        l_min,
+        match assembly_method {
+            AssemblyMethod::All => "all",
+            AssemblyMethod::Pca => "pca",
+        }
     );
 
     let seq_refs: Vec<&[u8]> = seqs.iter().map(|s| s.as_slice()).collect();
-    let edges = build_overlap_graph::<LIMBS>(&seq_refs, l_min, AssemblyMethod::All);
+    let edges = build_overlap_graph::<LIMBS>(&seq_refs, l_min, assembly_method);
     eprintln!("found {} edges", edges.len());
 
     let result = match gfa_path {
@@ -517,9 +538,9 @@ fn main() {
                 eprintln!("error creating {}: {}", path, e);
                 std::process::exit(1);
             });
-            write_gfa(&seq_refs, &edges, BufWriter::new(file), AssemblyMethod::All)
+            write_gfa(&seq_refs, &edges, BufWriter::new(file), assembly_method)
         }
-        None => write_gfa(&seq_refs, &edges, BufWriter::new(std::io::stdout()), AssemblyMethod::All),
+        None => write_gfa(&seq_refs, &edges, BufWriter::new(std::io::stdout()), assembly_method),
     };
 
     if let Err(e) = result {
