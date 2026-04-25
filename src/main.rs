@@ -351,8 +351,12 @@ pub fn write_gfa<W: std::io::Write>(
     seqs: &[&[u8]],
     edges: &[Edge],
     mut w: W,
+    assembly_method: AssemblyMethod,
 ) -> std::io::Result<()> {
-    writeln!(w, "H\tVN:Z:1.0")?;
+    match assembly_method {
+        AssemblyMethod::All => writeln!(w, "H\tVN:Z:1.0")?,
+        AssemblyMethod::Pca => writeln!(w, "H\tVN:Z:1.0\tam:Z:pca")?,
+    }
     for (i, s) in seqs.iter().enumerate() {
         writeln!(w, "S\t{}\t{}", i, std::str::from_utf8(s).unwrap())?;
     }
@@ -513,9 +517,9 @@ fn main() {
                 eprintln!("error creating {}: {}", path, e);
                 std::process::exit(1);
             });
-            write_gfa(&seq_refs, &edges, BufWriter::new(file))
+            write_gfa(&seq_refs, &edges, BufWriter::new(file), AssemblyMethod::All)
         }
-        None => write_gfa(&seq_refs, &edges, BufWriter::new(std::io::stdout())),
+        None => write_gfa(&seq_refs, &edges, BufWriter::new(std::io::stdout()), AssemblyMethod::All),
     };
 
     if let Err(e) = result {
@@ -746,5 +750,30 @@ mod tests {
             "PCA mode should keep Type 3 (Rev->Fwd) edges, got: {:?}",
             edges
         );
+    }
+
+    #[test]
+    fn gfa_header_includes_assembly_method_tag() {
+        let s0: &[u8] = b"ACGTACGT";
+        let seqs: &[&[u8]] = &[s0];
+        let edges: &[Edge] = &[];
+
+        let mut buf_all = Vec::new();
+        write_gfa(seqs, edges, &mut buf_all, AssemblyMethod::All).unwrap();
+        let header_all = std::str::from_utf8(&buf_all)
+            .unwrap()
+            .lines()
+            .next()
+            .unwrap();
+        assert_eq!(header_all, "H\tVN:Z:1.0");
+
+        let mut buf_pca = Vec::new();
+        write_gfa(seqs, edges, &mut buf_pca, AssemblyMethod::Pca).unwrap();
+        let header_pca = std::str::from_utf8(&buf_pca)
+            .unwrap()
+            .lines()
+            .next()
+            .unwrap();
+        assert_eq!(header_pca, "H\tVN:Z:1.0\tam:Z:pca");
     }
 }
