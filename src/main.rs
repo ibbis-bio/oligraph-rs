@@ -144,14 +144,14 @@ pub struct Edge {
 
 pub fn build_overlap_graph<const LIMBS: usize>(seqs: &[&[u8]], l_min: u32) -> Vec<Edge> {
     assert!(
-        l_min >= 1 && l_min <= 32,
+        (1..=32).contains(&l_min),
         "l_min must fit in a u64 seed (<=32)"
     );
 
     let n_seqs = seqs.len();
 
     // ---- 1. Pack forward + RC ---------------------------------------------
-    // segment_id encoding: 0..n_seqs are forward, n_seqs..2*n_seqs are RC
+    // packed[0..n_seqs]: forward strands, packed[n_seqs..2*n_seqs]: RC (for verification)
     let mut packed: Vec<Packed<LIMBS>> = Vec::with_capacity(2 * n_seqs);
     for s in seqs {
         // Skip sequences with N if you want strict matching; for now error out.
@@ -162,8 +162,6 @@ pub fn build_overlap_graph<const LIMBS: usize>(seqs: &[&[u8]], l_min: u32) -> Ve
         let rc = packed[i].revcomp();
         packed.push(rc);
     }
-    let n_segs = packed.len(); // == 2 * n_seqs
-
     // ---- 2. Index every prefix of length L_min -----------------------------
     //
     // Key: u64 holding the L_min 2-bit values (low 2*L_min bits).
