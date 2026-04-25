@@ -645,4 +645,48 @@ mod tests {
             edges
         );
     }
+
+    #[test]
+    fn overlap_length_correctness() {
+        let s0: &[u8] = b"ACGTACGTCCCC";
+        let s1: &[u8] = b"ACGTCCCCGGGG";
+        let s2: &[u8] = b"CCCCGGGGACGT";
+        let edges = build_overlap_graph::<1>(&[s0, s1, s2], 4);
+
+        let has_edge = |from: u32, fs: Strand, to: u32, ts: Strand, ov: u32| -> bool {
+            edges.iter().any(|e| {
+                (e.from_id == from
+                    && e.from_strand == fs
+                    && e.to_id == to
+                    && e.to_strand == ts
+                    && e.overlap_len == ov)
+                    || (e.from_id == to
+                        && e.from_strand == flip(ts)
+                        && e.to_id == from
+                        && e.to_strand == flip(fs)
+                        && e.overlap_len == ov)
+            })
+        };
+
+        assert!(
+            has_edge(0, Strand::Fwd, 1, Strand::Fwd, 8),
+            "expected 0+ -> 1+ overlap 8, got: {:?}",
+            edges
+        );
+        assert!(
+            has_edge(1, Strand::Fwd, 2, Strand::Fwd, 8),
+            "expected 1+ -> 2+ overlap 8, got: {:?}",
+            edges
+        );
+        assert!(
+            has_edge(0, Strand::Fwd, 2, Strand::Fwd, 4),
+            "expected 0+ -> 2+ overlap 4, got: {:?}",
+            edges
+        );
+        assert!(
+            has_edge(1, Strand::Fwd, 0, Strand::Rev, 4),
+            "expected 1+ -> 0- overlap 4, got: {:?}",
+            edges
+        );
+    }
 }
