@@ -148,7 +148,7 @@ pub enum AssemblyMethod {
 // LIMBS: choose so that 64*LIMBS >= max sequence length.
 // L_MIN: minimum overlap length (must be <= 32 for the seed-key fits-in-u64 invariant).
 
-pub fn build_overlap_graph<const LIMBS: usize>(seqs: &[&[u8]], l_min: u32, _assembly_method: AssemblyMethod) -> Vec<Edge> {
+pub fn build_overlap_graph<const LIMBS: usize>(seqs: &[&[u8]], l_min: u32, assembly_method: AssemblyMethod) -> Vec<Edge> {
     assert!(
         (1..=32).contains(&l_min),
         "l_min must fit in a u64 seed (<=32)"
@@ -237,6 +237,9 @@ pub fn build_overlap_graph<const LIMBS: usize>(seqs: &[&[u8]], l_min: u32, _asse
             if let Some(candidates) = prefix_index.get(&fwd_key) {
                 let overlap = len_a - p as u32;
                 for &(seq_b, strand_b) in candidates {
+                    if assembly_method == AssemblyMethod::Pca && strand_b == Strand::Fwd {
+                        continue;
+                    }
                     let target = if strand_b == Strand::Fwd {
                         &packed[seq_b as usize]
                     } else {
