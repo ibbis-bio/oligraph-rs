@@ -472,6 +472,263 @@ pub fn write_fasta<W: std::io::Write>(
     Ok(())
 }
 
+fn greedy_walk(
+    start_id: u32,
+    start_strand: Strand,
+    adj: &[Vec<(u32, Strand, u32)>],
+    visited: &mut [bool],
+) -> (Vec<(u32, Strand)>, Vec<u32>, u32) {
+    visited[start_id as usize] = true;
+    let mut path = vec![(start_id, start_strand)];
+    let mut overlaps: Vec<u32> = Vec::new();
+    let mut branches: u32 = 0;
+
+    let mut cur_id = start_id;
+    let mut cur_strand = start_strand;
+    loop {
+        let idx = cur_id as usize * 2 + (cur_strand == Strand::Rev) as usize;
+        let mut picked = None;
+        let mut extra_unvisited = 0u32;
+        for &(nid, nstrand, ov) in &adj[idx] {
+            if visited[nid as usize] {
+                continue;
+            }
+            if picked.is_none() {
+                picked = Some((nid, nstrand, ov));
+            } else {
+                extra_unvisited += 1;
+            }
+        }
+        if extra_unvisited > 0 {
+            branches += 1;
+        }
+        match picked {
+            Some((nid, nstrand, ov)) => {
+                visited[nid as usize] = true;
+                path.push((nid, nstrand));
+                overlaps.push(ov);
+                cur_id = nid;
+                cur_strand = nstrand;
+            }
+            None => break,
+        }
+    }
+    (path, overlaps, branches)
+}
+
+fn pick_start(
+    comp: &[u32],
+    adj: &[Vec<(u32, Strand, u32)>],
+    visited: &[bool],
+) -> (u32, Strand) {
+    let mut best_tip: Option<(u32, Strand, u32)> = None;
+    for &id in comp {
+        if visited[id as usize] {
+            continue;
+        }
+        for strand in [Strand::Fwd, Strand::Rev] {
+            let idx = id as usize * 2 + (strand == Strand::Rev) as usize;
+            let flip_idx = id as usize * 2 + (flip(strand) == Strand::Rev) as usize;
+            let has_fwd = adj[idx].iter().any(|&(nid, _, _)| !visited[nid as usize]);
+            let has_flip = adj[flip_idx].iter().any(|&(nid, _, _)| !visited[nid as usize]);
+            if has_fwd && !has_flip {
+                let max_ov = adj[idx]
+                    .iter()
+                    .filter(|&&(nid, _, _)| !visited[nid as usize])
+                    .map(|&(_, _, ov)| ov)
+                    .max()
+                    .unwrap_or(0);
+                if best_tip.is_none()
+                    || max_ov > best_tip.unwrap().2
+                    || (max_ov == best_tip.unwrap().2 && id < best_tip.unwrap().0)
+                {
+                    best_tip = Some((id, strand, max_ov));
+                }
+            }
+        }
+    }
+    if let Some((id, strand, _)) = best_tip {
+        return (id, strand);
+    }
+    let mut best: (u32, Strand, u32) = (comp[0], Strand::Fwd, 0);
+    for &id in comp {
+        if visited[id as usize] {
+            continue;
+        }
+        for strand in [Strand::Fwd, Strand::Rev] {
+            let idx = id as usize * 2 + (strand == Strand::Rev) as usize;
+            for &(nid, _, ov) in &adj[idx] {
+                if visited[nid as usize] {
+                    continue;
+                }
+                if ov > best.2 || (ov == best.2 && id < best.0) {
+                    best = (id, strand, ov);
+                }
+            }
+        }
+    }
+    (best.0, best.1)
+}
+
+fn greedy_bidirectional_walk(
+    comp: &[u32],
+    adj: &[Vec<(u32, Strand, u32)>],
+    visited: &mut [bool],
+) -> (Vec<(u32, Strand)>, Vec<u32>, u32) {
+    let (start_id, start_strand) = pick_start(comp, adj, visited);
+
+    let (fwd_path, fwd_overlaps, fwd_branches) =
+        greedy_walk(start_id, start_strand, adj, visited);
+
+    let (bwd_path, bwd_overlaps, bwd_branches) =
+        greedy_walk(start_id, flip(start_strand), adj, visited);
+
+    let total_branches = fwd_branches + bwd_branches;
+
+    if bwd_path.len() <= 1 {
+        return (fwd_path, fwd_overlaps, total_branches);
+    }
+
+    let mut prefix_path: Vec<(u32, Strand)> = bwd_path[1..]
+        .iter()
+        .rev()
+        .map(|&(id, s)| (id, flip(s)))
+        .collect();
+    let mut prefix_overlaps: Vec<u32> = bwd_overlaps.iter().rev().copied().collect();
+
+    prefix_path.extend(fwd_path);
+    prefix_overlaps.extend(fwd_overlaps);
+
+    (prefix_path, prefix_overlaps, total_branches)
+}
+
+fn detect_topology(
+    path: &[(u32, Strand)],
+    adj: &[Vec<(u32, Strand, u32)>],
+) -> Topology {
+    if path.len() < 2 {
+        return Topology::Linear;
+    }
+    let (last_id, last_strand) = path[path.len() - 1];
+    let (first_id, first_strand) = path[0];
+    let idx = last_id as usize * 2 + (last_strand == Strand::Rev) as usize;
+    for &(nid, nstrand, _) in &adj[idx] {
+        if nid == first_id && nstrand == first_strand {
+            return Topology::Cyclic;
+        }
+    }
+    Topology::Linear
+}
+
+fn stitch(
+    path: &[(u32, Strand)],
+    overlaps: &[u32],
+    seqs: &[&[u8]],
+) -> Vec<u8> {
+    if path.is_empty() {
+        return Vec::new();
+    }
+
+    fn oriented_seq(seqs: &[&[u8]], id: u32, strand: Strand) -> Vec<u8> {
+        let s = seqs[id as usize];
+        match strand {
+            Strand::Fwd => s.to_vec(),
+            Strand::Rev => rc_bytes(s),
+        }
+    }
+
+    let total_estimate: usize = path.iter().map(|&(id, _)| seqs[id as usize].len()).sum::<usize>()
+        - overlaps.iter().map(|&o| o as usize).sum::<usize>();
+    let mut buf: Vec<u8> = Vec::with_capacity(total_estimate);
+
+    let (first_id, first_strand) = path[0];
+    buf.extend_from_slice(&oriented_seq(seqs, first_id, first_strand));
+
+    for (i, &(id, strand)) in path[1..].iter().enumerate() {
+        let ov = overlaps[i] as usize;
+        let s = oriented_seq(seqs, id, strand);
+        buf.extend_from_slice(&s[ov..]);
+    }
+
+    buf
+}
+
+pub fn assemble_contigs(seqs: &[&[u8]], edges: &[Edge]) -> Vec<Contig> {
+    let n = seqs.len();
+    if n == 0 || edges.is_empty() {
+        return Vec::new();
+    }
+
+    let mut adj: Vec<Vec<(u32, Strand, u32)>> = vec![Vec::new(); n * 2];
+    for e in edges {
+        let from_idx = e.from_id as usize * 2 + (e.from_strand == Strand::Rev) as usize;
+        adj[from_idx].push((e.to_id, e.to_strand, e.overlap_len));
+        let mirror_from = e.to_id as usize * 2 + (flip(e.to_strand) == Strand::Rev) as usize;
+        adj[mirror_from].push((e.from_id, flip(e.from_strand), e.overlap_len));
+    }
+    for slot in &mut adj {
+        slot.sort_unstable_by(|a, b| {
+            b.2.cmp(&a.2)
+                .then(a.0.cmp(&b.0))
+                .then((a.1 as u8).cmp(&(b.1 as u8)))
+        });
+    }
+
+    let mut uf = UnionFind::new(n);
+    let mut has_edge = vec![false; n];
+    for e in edges {
+        if e.from_id != e.to_id {
+            uf.union(e.from_id, e.to_id);
+            has_edge[e.from_id as usize] = true;
+            has_edge[e.to_id as usize] = true;
+        }
+    }
+
+    let mut comp_map: FxHashMap<u32, Vec<u32>> = FxHashMap::default();
+    for i in 0..n {
+        if !has_edge[i] {
+            continue;
+        }
+        let root = uf.find(i as u32);
+        comp_map.entry(root).or_default().push(i as u32);
+    }
+    let mut components: Vec<Vec<u32>> = comp_map.into_values().collect();
+    components.sort_unstable_by(|a, b| {
+        b.len().cmp(&a.len()).then_with(|| {
+            let min_a = a.iter().min().unwrap();
+            let min_b = b.iter().min().unwrap();
+            min_a.cmp(min_b)
+        })
+    });
+
+    let mut visited = vec![false; n];
+    let mut contigs: Vec<Contig> = Vec::new();
+
+    for (comp_idx, comp) in components.iter().enumerate() {
+        while comp.iter().any(|&id| !visited[id as usize]) {
+            let (path, overlaps, branches) =
+                greedy_bidirectional_walk(comp, &adj, &mut visited);
+
+            let topology = detect_topology(&path, &adj);
+            let sequence = stitch(&path, &overlaps, seqs);
+
+            contigs.push(Contig {
+                sequence,
+                component: comp_idx,
+                path,
+                topology,
+                branches,
+            });
+        }
+    }
+
+    contigs.sort_unstable_by(|a, b| {
+        b.sequence.len().cmp(&a.sequence.len()).then(a.component.cmp(&b.component))
+    });
+
+    contigs
+}
+
 const LIMBS: usize = 10;
 
 fn parse_fasta(path: &str) -> std::io::Result<Vec<Vec<u8>>> {
@@ -940,6 +1197,20 @@ mod tests {
         assert_eq!(lines[4], ">2");
         assert_eq!(lines[5], "TTTTAAAA");
         assert_eq!(lines.len(), 6);
+    }
+
+    #[test]
+    fn assemble_contigs_isolated_nodes_discarded() {
+        let s0: &[u8] = b"ACGTACGTCCCCCC";
+        let s1: &[u8] = b"CCCCCCGGGGGGGG";
+        let s2: &[u8] = b"TTTTTTTTTTTTTT";
+        let edges = build_overlap_graph::<1>(&[s0, s1, s2], 6, AssemblyMethod::All);
+        let contigs = assemble_contigs(&[s0, s1, s2], &edges);
+        for c in &contigs {
+            assert!(!c.path.iter().any(|&(id, _)| id == 2),
+                "isolated node 2 should not appear in any contig");
+        }
+        assert!(!contigs.is_empty(), "should produce at least one contig from the 0-1 edge");
     }
 
     #[test]
