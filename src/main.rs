@@ -729,6 +729,43 @@ pub fn assemble_contigs(seqs: &[&[u8]], edges: &[Edge]) -> Vec<Contig> {
     contigs
 }
 
+pub fn write_contigs_fasta<W: std::io::Write>(
+    contigs: &[Contig],
+    mut w: W,
+) -> std::io::Result<()> {
+    for (i, c) in contigs.iter().enumerate() {
+        let topo = match c.topology {
+            Topology::Linear => "linear",
+            Topology::Cyclic => "cyclic",
+        };
+        let path_str: String = c
+            .path
+            .iter()
+            .map(|&(id, s)| {
+                let sc = match s {
+                    Strand::Fwd => '+',
+                    Strand::Rev => '-',
+                };
+                format!("{}{}", id, sc)
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        writeln!(
+            w,
+            ">contig_{} component={} oligos={} length={} topology={} branches={} path={}",
+            i,
+            c.component,
+            c.path.len(),
+            c.sequence.len(),
+            topo,
+            c.branches,
+            path_str,
+        )?;
+        writeln!(w, "{}", std::str::from_utf8(&c.sequence).unwrap())?;
+    }
+    Ok(())
+}
+
 const LIMBS: usize = 10;
 
 fn parse_fasta(path: &str) -> std::io::Result<Vec<Vec<u8>>> {
@@ -1348,6 +1385,34 @@ mod tests {
         let comp1_contig = contigs.iter().find(|c| c.component == 1).unwrap();
         assert!(comp0_contig.path.len() >= comp1_contig.path.len(),
             "component 0 should be the larger component");
+    }
+
+    #[test]
+    fn write_contigs_fasta_format() {
+        let contigs = vec![
+            Contig {
+                sequence: b"ACGTACGTCCCCCCGGGGGG".to_vec(),
+                component: 0,
+                path: vec![(3, Strand::Fwd), (7, Strand::Rev), (1, Strand::Fwd)],
+                topology: Topology::Linear,
+                branches: 1,
+            },
+            Contig {
+                sequence: b"TTTTAAAA".to_vec(),
+                component: 1,
+                path: vec![(5, Strand::Fwd)],
+                topology: Topology::Cyclic,
+                branches: 0,
+            },
+        ];
+        let mut buf = Vec::new();
+        write_contigs_fasta(&contigs, &mut buf).unwrap();
+        let output = String::from_utf8(buf).unwrap();
+        let lines: Vec<&str> = output.lines().collect();
+        assert_eq!(lines[0], ">contig_0 component=0 oligos=3 length=20 topology=linear branches=1 path=3+,7-,1+");
+        assert_eq!(lines[1], "ACGTACGTCCCCCCGGGGGG");
+        assert_eq!(lines[2], ">contig_1 component=1 oligos=1 length=8 topology=cyclic branches=0 path=5+");
+        assert_eq!(lines[3], "TTTTAAAA");
     }
 
     #[test]
