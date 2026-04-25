@@ -167,7 +167,7 @@ pub fn build_overlap_graph<const LIMBS: usize>(seqs: &[&[u8]], l_min: u32) -> Ve
     // ---- 2. Index every prefix of length L_min -----------------------------
     //
     // Key: u64 holding the L_min 2-bit values (low 2*L_min bits).
-    // Value: Vec<u32> of segment IDs whose prefix matches.
+    // Value: Vec<(seq_id, strand)> — tagged so we know which orientation matched.
 
     let mask: u64 = if l_min == 32 {
         u64::MAX
@@ -175,28 +175,32 @@ pub fn build_overlap_graph<const LIMBS: usize>(seqs: &[&[u8]], l_min: u32) -> Ve
         (1u64 << (2 * l_min)) - 1
     };
 
-    let mut prefix_index: FxHashMap<u64, Vec<u32>> =
-        FxHashMap::with_capacity_and_hasher(n_segs, Default::default());
+    let mut prefix_index: FxHashMap<u64, Vec<(u32, Strand)>> =
+        FxHashMap::with_capacity_and_hasher(2 * n_seqs, Default::default());
 
-    for (k, p) in packed.iter().enumerate() {
-        if p.len < l_min {
+    for i in 0..n_seqs {
+        let fwd = &packed[i];
+        if fwd.len < l_min {
             continue;
         }
-        // First L_min bases as a u64 (little-endian within the limb)
-        let key = p.limbs[0] & mask;
-        prefix_index.entry(key).or_default().push(k as u32);
+        let fwd_key = fwd.limbs[0] & mask;
+        prefix_index
+            .entry(fwd_key)
+            .or_default()
+            .push((i as u32, Strand::Fwd));
+
+        let rc = &packed[n_seqs + i];
+        let rc_key = rc.limbs[0] & mask;
+        prefix_index
+            .entry(rc_key)
+            .or_default()
+            .push((i as u32, Strand::Rev));
     }
 
     // ---- 3. Seed-and-extend ------------------------------------------------
     //
-    // For each segment seg_a (the suffix side), for each suffix-start position p
-    // such that seg_a.len - p >= l_min:
-    //   - Compute the L_min-mer at position p of seg_a.
-    //   - Look it up; for each candidate seg_b (the prefix side):
-    //       * Skip if same underlying seq_id.
-    //       * Verify seg_a[p..len_a]  ==  seg_b[0..len_a - p]
-    //         (entire remaining suffix of seg_a must match a prefix of seg_b)
-    //       * If yes, emit edge (seg_a -> seg_b, overlap = len_a - p).
+    // Temporary: scan 2N segments using the tagged prefix index.
+    // Task 3 will replace this with the single-loop dual-seed approach.
 
     let mut raw: Vec<Edge> = Vec::new();
 
@@ -216,67 +220,55 @@ pub fn build_overlap_graph<const LIMBS: usize>(seqs: &[&[u8]], l_min: u32) -> Ve
             continue;
         }
 
-        // Rolling key: shift in next base, mask to 2*l_min bits.
-        // Initialize with the L_min-mer at position 0.
         let mut key: u64 = pa.limbs[0] & mask;
-
-        // We walk p = 0..(len_a - l_min)
         let last_p = (pa.len - l_min) as usize;
+
         for p in 0..=last_p {
             if let Some(candidates) = prefix_index.get(&key) {
                 let overlap = pa.len - p as u32;
-                for &seg_b_u in candidates {
-                    let seg_b = seg_b_u as usize;
-                    if seg_b == seg_a {
+                for &(seq_b, strand_b) in candidates {
+                    let seg_b_idx = if strand_b == Strand::Fwd {
+                        seq_b as usize
+                    } else {
+                        n_seqs + seq_b as usize
+                    };
+                    if seg_b_idx == seg_a {
                         continue;
                     }
-                    // Forbid a sequence overlapping itself or its own RC
-                    let id_a = (seg_a % n_seqs) as u32;
-                    let id_b = (seg_b % n_seqs) as u32;
-                    if id_a == id_b {
+                    let id_a = seg_a % n_seqs;
+                    if id_a == seq_b as usize {
                         continue;
                     }
 
-                    let pb = &packed[seg_b];
-                    if pb.len < overlap {
+                    let pb_seq = &packed[seg_b_idx];
+                    if pb_seq.len < overlap {
                         continue;
-                    } // prefix too short
+                    }
 
-                    // Verify: pa[p..p+overlap] == pb[0..overlap]
-                    // Skip first L_min, already guaranteed by the seed.
                     if pa.match_range(
                         p + l_min as usize,
-                        pb,
+                        pb_seq,
                         l_min as usize,
                         (overlap - l_min) as usize,
                     ) {
                         raw.push(Edge {
-                            from_id: id_a,
+                            from_id: (id_a) as u32,
                             from_strand: if seg_a < n_seqs {
                                 Strand::Fwd
                             } else {
                                 Strand::Rev
                             },
-                            to_id: id_b,
-                            to_strand: if seg_b < n_seqs {
-                                Strand::Fwd
-                            } else {
-                                Strand::Rev
-                            },
+                            to_id: seq_b,
+                            to_strand: strand_b,
                             overlap_len: overlap,
                         });
                     }
                 }
             }
 
-            // Roll: drop base at p, append base at p + l_min.
             if p < last_p {
-                let drop = pa.base_at(p);
                 let add = pa.base_at(p + l_min as usize);
-                // Slide window right by one base
                 key = (key >> 2) | (add << (2 * (l_min - 1)));
-                // (the `drop` value is naturally evicted by the shift; subtract not needed)
-                let _ = drop;
             }
         }
     }
@@ -519,6 +511,22 @@ mod tests {
         assert!(!edges
             .iter()
             .any(|e| (e.from_id == 0 && e.to_id == 1) || (e.from_id == 1 && e.to_id == 0)));
+    }
+
+    #[test]
+    fn fwd_rev_overlap() {
+        let s0: &[u8] = b"AACCGGTTAACCGG";
+        let s1: &[u8] = b"GGGGGGCCGGTTAA";
+        let edges = build_overlap_graph::<1>(&[s0, s1], 6);
+        assert!(
+            edges.iter().any(|e| e.from_id == 0
+                && e.to_id == 1
+                && e.from_strand == Strand::Fwd
+                && e.to_strand == Strand::Rev
+                && e.overlap_len == 8),
+            "expected Fwd->Rev edge with overlap 8, got: {:?}",
+            edges
+        );
     }
 
     #[test]
