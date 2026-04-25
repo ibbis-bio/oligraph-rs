@@ -5,6 +5,7 @@
 use std::env;
 use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter};
+use std::path::Path;
 
 use indicatif::{ProgressBar, ProgressStyle};
 use rustc_hash::FxHashMap;
@@ -139,6 +140,33 @@ pub struct Edge {
 pub enum AssemblyMethod {
     All,
     Pca,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Topology {
+    Linear,
+    Cyclic,
+}
+
+pub struct Contig {
+    pub sequence: Vec<u8>,
+    pub component: usize,
+    pub path: Vec<(u32, Strand)>,
+    pub topology: Topology,
+    pub branches: u32,
+}
+
+fn rc_bytes(seq: &[u8]) -> Vec<u8> {
+    seq.iter()
+        .rev()
+        .map(|&b| match b {
+            b'A' => b'T',
+            b'T' => b'A',
+            b'C' => b'G',
+            b'G' => b'C',
+            _ => b,
+        })
+        .collect()
 }
 
 // ============================================================
@@ -378,6 +406,34 @@ pub fn write_gfa<W: std::io::Write>(
     Ok(())
 }
 
+pub fn write_fasta<W: std::io::Write>(
+    seqs: &[&[u8]],
+    edges: &[Edge],
+    mut w: W,
+) -> std::io::Result<()> {
+    let mut edges_by_from: Vec<Vec<&Edge>> = vec![Vec::new(); seqs.len()];
+    for e in edges {
+        edges_by_from[e.from_id as usize].push(e);
+    }
+    for (i, s) in seqs.iter().enumerate() {
+        write!(w, ">{}", i)?;
+        for e in &edges_by_from[i] {
+            let f = match e.from_strand {
+                Strand::Fwd => '+',
+                Strand::Rev => '-',
+            };
+            let t = match e.to_strand {
+                Strand::Fwd => '+',
+                Strand::Rev => '-',
+            };
+            write!(w, " L:{}:{}:{}", f, e.to_id, t)?;
+        }
+        writeln!(w)?;
+        writeln!(w, "{}", std::str::from_utf8(s).unwrap())?;
+    }
+    Ok(())
+}
+
 const LIMBS: usize = 10;
 
 fn parse_fasta(path: &str) -> std::io::Result<Vec<Vec<u8>>> {
@@ -424,7 +480,8 @@ fn parse_fasta(path: &str) -> std::io::Result<Vec<Vec<u8>>> {
 fn usage() -> ! {
     eprintln!("Usage: oligraph-rs <input.fasta> [output.gfa] [-l <min_overlap>] [--assembly-method <all|pca>]");
     eprintln!("  input.fasta                Input FASTA file of sequences");
-    eprintln!("  output.gfa                 Output GFA file (default: stdout)");
+    eprintln!("  output.gfa                 Output GFA file (default: stdout, GFA only)");
+    eprintln!("                             Also writes .fasta alongside the .gfa");
     eprintln!("  -l <min>                   Minimum overlap length (default: 20, max: 32)");
     eprintln!("  --assembly-method <method>  Assembly method filter (default: all)");
     std::process::exit(1);
@@ -532,20 +589,37 @@ fn main() {
     let edges = build_overlap_graph::<LIMBS>(&seq_refs, l_min, assembly_method);
     eprintln!("found {} edges", edges.len());
 
-    let result = match gfa_path {
+    match gfa_path {
         Some(path) => {
-            let file = File::create(path).unwrap_or_else(|e| {
+            let gfa_file = File::create(path).unwrap_or_else(|e| {
                 eprintln!("error creating {}: {}", path, e);
                 std::process::exit(1);
             });
-            write_gfa(&seq_refs, &edges, BufWriter::new(file), assembly_method)
-        }
-        None => write_gfa(&seq_refs, &edges, BufWriter::new(std::io::stdout()), assembly_method),
-    };
+            if let Err(e) = write_gfa(&seq_refs, &edges, BufWriter::new(gfa_file), assembly_method)
+            {
+                eprintln!("error writing GFA: {}", e);
+                std::process::exit(1);
+            }
 
-    if let Err(e) = result {
-        eprintln!("error writing GFA: {}", e);
-        std::process::exit(1);
+            let fasta_path = Path::new(path).with_extension("fasta");
+            let fasta_file = File::create(&fasta_path).unwrap_or_else(|e| {
+                eprintln!("error creating {}: {}", fasta_path.display(), e);
+                std::process::exit(1);
+            });
+            if let Err(e) = write_fasta(&seq_refs, &edges, BufWriter::new(fasta_file)) {
+                eprintln!("error writing FASTA: {}", e);
+                std::process::exit(1);
+            }
+            eprintln!("wrote {}", fasta_path.display());
+        }
+        None => {
+            if let Err(e) =
+                write_gfa(&seq_refs, &edges, BufWriter::new(std::io::stdout()), assembly_method)
+            {
+                eprintln!("error writing GFA: {}", e);
+                std::process::exit(1);
+            }
+        }
     }
 }
 
@@ -796,5 +870,37 @@ mod tests {
             .next()
             .unwrap();
         assert_eq!(header_pca, "H\tVN:Z:1.0\tam:Z:pca");
+    }
+
+    #[test]
+    fn fasta_output_format() {
+        let seqs: Vec<&[u8]> = vec![b"ACGTACGT", b"CGTACGTT", b"TTTTAAAA"];
+        let edges = vec![
+            Edge {
+                from_id: 0,
+                from_strand: Strand::Fwd,
+                to_id: 1,
+                to_strand: Strand::Fwd,
+                overlap_len: 7,
+            },
+            Edge {
+                from_id: 0,
+                from_strand: Strand::Rev,
+                to_id: 2,
+                to_strand: Strand::Fwd,
+                overlap_len: 4,
+            },
+        ];
+        let mut buf = Vec::new();
+        write_fasta(&seqs, &edges, &mut buf).unwrap();
+        let output = String::from_utf8(buf).unwrap();
+        let lines: Vec<&str> = output.lines().collect();
+        assert_eq!(lines[0], ">0 L:+:1:+ L:-:2:+");
+        assert_eq!(lines[1], "ACGTACGT");
+        assert_eq!(lines[2], ">1");
+        assert_eq!(lines[3], "CGTACGTT");
+        assert_eq!(lines[4], ">2");
+        assert_eq!(lines[5], "TTTTAAAA");
+        assert_eq!(lines.len(), 6);
     }
 }
