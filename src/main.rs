@@ -606,4 +606,43 @@ mod tests {
             edges
         );
     }
+
+    #[test]
+    fn self_overlap_tandem_repeat() {
+        let s: &[u8] = b"ACGTACGTACGT";
+        let edges = build_overlap_graph::<1>(&[s], 4);
+        assert!(
+            edges
+                .iter()
+                .any(|e| e.from_id == 0 && e.to_id == 0 && e.overlap_len == 8),
+            "expected tandem self-overlap with overlap 8, got: {:?}",
+            edges
+        );
+        assert!(
+            !edges
+                .iter()
+                .any(|e| e.from_id == 0 && e.to_id == 0 && e.overlap_len == 12),
+            "trivial full-length self-loop should be filtered, got: {:?}",
+            edges
+        );
+    }
+
+    #[test]
+    fn self_rc_overlap() {
+        // s = "AACCAACCGGTT" (12bp)
+        // RC = comp: TTGGTTGGCCAA, rev: AACCGGTTGGTT (12bp)
+        // s suffix at p=4: "AACCGGTT" (8bp). RC prefix[0..8]: "AACCGGTT". MATCH!
+        // Edge: 0+ -> 0- with overlap 8.
+        let s: &[u8] = b"AACCAACCGGTT";
+        let edges = build_overlap_graph::<1>(&[s], 6);
+        assert!(
+            edges.iter().any(|e| e.from_id == 0
+                && e.to_id == 0
+                && e.from_strand == Strand::Fwd
+                && e.to_strand == Strand::Rev
+                && e.overlap_len == 8),
+            "expected self-RC edge 0+ -> 0- with overlap 8, got: {:?}",
+            edges
+        );
+    }
 }
