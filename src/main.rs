@@ -693,4 +693,55 @@ mod tests {
             edges
         );
     }
+
+    #[test]
+    fn pca_drops_fwd_fwd_overlap() {
+        let s0: &[u8] = b"ACGTACGTACGT";
+        let s1: &[u8] = b"ACGTACGTGGGGGG";
+        let edges = build_overlap_graph::<1>(&[s0, s1], 6, AssemblyMethod::Pca);
+        assert!(
+            !edges.iter().any(|e| e.from_strand == Strand::Fwd && e.to_strand == Strand::Fwd),
+            "PCA mode should drop Type 1 (Fwd->Fwd) edges, got: {:?}",
+            edges
+        );
+    }
+
+    #[test]
+    fn pca_keeps_fwd_rev_overlap() {
+        let s0: &[u8] = b"AACCGGTTAACCGG";
+        let s1: &[u8] = b"GGGGGGCCGGTTAA";
+        let edges = build_overlap_graph::<1>(&[s0, s1], 6, AssemblyMethod::Pca);
+        assert!(
+            edges.iter().any(|e| e.from_id == 0
+                && e.to_id == 1
+                && e.from_strand == Strand::Fwd
+                && e.to_strand == Strand::Rev
+                && e.overlap_len == 8),
+            "PCA mode should keep Type 2 (Fwd->Rev) edges, got: {:?}",
+            edges
+        );
+    }
+
+    #[test]
+    fn pca_keeps_rev_fwd_overlap() {
+        let a: &[u8] = b"AACCGGTTTT";
+        let b: &[u8] = b"CCGGTTGGGG";
+        let edges = build_overlap_graph::<1>(&[a, b], 6, AssemblyMethod::Pca);
+        assert!(
+            edges.iter().any(|e| {
+                (e.from_id == 0
+                    && e.to_id == 1
+                    && e.from_strand == Strand::Rev
+                    && e.to_strand == Strand::Fwd
+                    && e.overlap_len == 6)
+                    || (e.from_id == 1
+                        && e.to_id == 0
+                        && e.from_strand == Strand::Rev
+                        && e.to_strand == Strand::Fwd
+                        && e.overlap_len == 6)
+            }),
+            "PCA mode should keep Type 3 (Rev->Fwd) edges, got: {:?}",
+            edges
+        );
+    }
 }
