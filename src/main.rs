@@ -943,6 +943,26 @@ fn main() {
                 std::process::exit(1);
             }
             eprintln!("wrote {}", fasta_path.display());
+
+            let contigs = assemble_contigs(&seq_refs, &edges);
+            if !contigs.is_empty() {
+                let contigs_path = Path::new(path).with_extension("contigs.fasta");
+                let contigs_file = File::create(&contigs_path).unwrap_or_else(|e| {
+                    eprintln!("error creating {}: {}", contigs_path.display(), e);
+                    std::process::exit(1);
+                });
+                if let Err(e) = write_contigs_fasta(&contigs, BufWriter::new(contigs_file)) {
+                    eprintln!("error writing contigs: {}", e);
+                    std::process::exit(1);
+                }
+                eprintln!(
+                    "wrote {} ({} contigs)",
+                    contigs_path.display(),
+                    contigs.len()
+                );
+            } else {
+                eprintln!("no contigs assembled (no connected components with edges)");
+            }
         }
         None => {
             if let Err(e) =
