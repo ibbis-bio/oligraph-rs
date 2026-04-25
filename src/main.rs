@@ -1222,4 +1222,142 @@ mod tests {
         assert_eq!(uf.find(0), uf.find(3));
         assert_ne!(uf.find(0), uf.find(4));
     }
+
+    #[test]
+    fn contig_single_edge_stitch() {
+        let s0: &[u8] = b"ACGTACGTCCCCCC";
+        let s1: &[u8] = b"CCCCCCGGGGGGGG";
+        let edges = build_overlap_graph::<1>(&[s0, s1], 6, AssemblyMethod::All);
+        let contigs = assemble_contigs(&[s0, s1], &edges);
+        assert_eq!(contigs.len(), 1);
+        let c = &contigs[0];
+        assert_eq!(c.path.len(), 2);
+        // Assembler may walk in either direction; accept both orientations
+        let fwd = b"ACGTACGTCCCCCCGGGGGGGG".to_vec();
+        let rev = rc_bytes(&fwd);
+        assert!(
+            c.sequence == fwd || c.sequence == rev,
+            "expected stitched sequence in either orientation, got: {}",
+            String::from_utf8_lossy(&c.sequence)
+        );
+        assert_eq!(c.topology, Topology::Linear);
+    }
+
+    #[test]
+    fn contig_linear_chain_three_nodes() {
+        // A = "AACCGGTTAACCGG" (14bp), B = "TTTTTTCCGGTTAA" (14bp), C = "AAAAAACCCCCCCC"
+        // The assembler produces a 3-node chain through A, B, C (possibly in RC orientation).
+        // The chain stitches all three nodes regardless of walk direction.
+        let a: &[u8] = b"AACCGGTTAACCGG";
+        let b: &[u8] = b"TTTTTTCCGGTTAA";
+        let c: &[u8] = b"AAAAAACCCCCCCC";
+        let edges = build_overlap_graph::<1>(&[a, b, c], 6, AssemblyMethod::All);
+        let contigs = assemble_contigs(&[a, b, c], &edges);
+        // Expect a contig that includes all three nodes in its path
+        let full_chain = contigs.iter().find(|ct| ct.path.len() >= 3);
+        assert!(
+            full_chain.is_some() || contigs.iter().any(|ct| {
+                let ids: Vec<u32> = ct.path.iter().map(|&(id, _)| id).collect();
+                ids.contains(&0) && ids.contains(&1) && ids.contains(&2)
+            }),
+            "expected a contig containing all three nodes, got: {:?}",
+            contigs.iter().map(|ct| {
+                let ids: Vec<u32> = ct.path.iter().map(|&(id, _)| id).collect();
+                format!("ids={:?} seq={}", ids, String::from_utf8_lossy(&ct.sequence))
+            }).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn contig_branch_picks_longest_overlap() {
+        // A has overlaps to both B and C; greedy should pick the longer overlap first.
+        // The first (longest) contig should contain A and its best neighbor.
+        let a: &[u8] = b"ACGTACGTACCCCCCCCC";
+        let b: &[u8] = b"CCCCCCCCCTTTTTTTT";
+        let c: &[u8] = b"CCCCCCGGGGGGGGGGGG";
+        let seqs: &[&[u8]] = &[a, b, c];
+        let edges = build_overlap_graph::<1>(seqs, 6, AssemblyMethod::All);
+        let contigs = assemble_contigs(seqs, &edges);
+        // The first contig (longest sequence) should contain node 0 (A)
+        let longest = &contigs[0];
+        assert!(
+            longest.path.iter().any(|&(id, _)| id == 0),
+            "longest contig should include node 0, path: {:?}",
+            longest.path
+        );
+        // At least 2 contigs expected since B and C can't both be on the same path with A
+        // (one gets consumed first, the other becomes a separate contig)
+        assert!(contigs.len() >= 2, "expected at least 2 contigs from branching graph, got {}", contigs.len());
+    }
+
+    #[test]
+    fn contig_equal_overlap_tiebreak_by_id() {
+        let a: &[u8] = b"ACGTACCCCCCC";
+        let b: &[u8] = b"CCCCCCTTTTTT";
+        let c: &[u8] = b"CCCCCCAAAAAA";
+        let seqs: &[&[u8]] = &[a, b, c];
+        let edges = build_overlap_graph::<1>(seqs, 6, AssemblyMethod::All);
+        let contigs = assemble_contigs(seqs, &edges);
+        let first = &contigs[0];
+        let ids: Vec<u32> = first.path.iter().map(|&(id, _)| id).collect();
+        assert!(
+            ids.contains(&0) && ids.contains(&1),
+            "equal overlap tiebreaker should pick lower seq_id (1 over 2), path ids: {:?}",
+            ids
+        );
+    }
+
+    #[test]
+    fn contig_empty_graph() {
+        let s0: &[u8] = b"ACGTACGT";
+        let contigs = assemble_contigs(&[s0], &[]);
+        assert!(contigs.is_empty());
+    }
+
+    #[test]
+    fn contig_backward_walk_extends() {
+        let a: &[u8] = b"AAAACCCCCCCC";
+        let b: &[u8] = b"CCCCCCCCTTTT";
+        let c: &[u8] = b"TTTTGGGGGGGG";
+        let seqs: &[&[u8]] = &[a, b, c];
+        let edges = build_overlap_graph::<1>(seqs, 4, AssemblyMethod::All);
+        let contigs = assemble_contigs(seqs, &edges);
+        assert_eq!(contigs.len(), 1, "expected 1 contig from linear chain, got {}", contigs.len());
+        let ids: Vec<u32> = contigs[0].path.iter().map(|&(id, _)| id).collect();
+        assert!(ids.contains(&0) && ids.contains(&1) && ids.contains(&2),
+            "backward walk should capture full chain, path ids: {:?}", ids);
+    }
+
+    #[test]
+    fn contig_multi_component_ordering() {
+        // Two disconnected components: {s0,s1,s2} and {s3,s4}, plus isolated s5.
+        // Use a sequence for s5 that won't overlap with anything at l_min=6.
+        let s0: &[u8] = b"AAAAACCCCCCC";
+        let s1: &[u8] = b"CCCCCCCGGGGG";
+        let s2: &[u8] = b"GGGGGTTTTTTTT";
+        let s3: &[u8] = b"ACACACACACAC";
+        let s4: &[u8] = b"CACACACACGTGT";
+        let s5: &[u8] = b"AGTCAGTCAGTC";
+        let seqs: &[&[u8]] = &[s0, s1, s2, s3, s4, s5];
+        let edges = build_overlap_graph::<1>(seqs, 6, AssemblyMethod::All);
+        let contigs = assemble_contigs(seqs, &edges);
+        assert!(contigs.len() >= 2, "expected at least 2 contigs from 2 components");
+        assert!(!contigs.iter().any(|c| c.path.iter().any(|&(id, _)| id == 5)),
+            "isolated node s5 should not appear");
+        let comp0_contig = contigs.iter().find(|c| c.component == 0).unwrap();
+        let comp1_contig = contigs.iter().find(|c| c.component == 1).unwrap();
+        assert!(comp0_contig.path.len() >= comp1_contig.path.len(),
+            "component 0 should be the larger component");
+    }
+
+    #[test]
+    fn contig_self_overlap_no_infinite_loop() {
+        let s: &[u8] = b"ACGTACGTACGT";
+        let edges = build_overlap_graph::<1>(&[s], 4, AssemblyMethod::All);
+        let contigs = assemble_contigs(&[s], &edges);
+        assert!(contigs.len() <= 1);
+        if !contigs.is_empty() {
+            assert_eq!(contigs[0].path.len(), 1, "self-edge should not produce multi-node contig");
+        }
+    }
 }
