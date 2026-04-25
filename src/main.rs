@@ -135,6 +135,12 @@ pub struct Edge {
     pub overlap_len: u32,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum AssemblyMethod {
+    All,
+    Pca,
+}
+
 // ============================================================
 // Build overlap graph
 // ============================================================
@@ -142,7 +148,7 @@ pub struct Edge {
 // LIMBS: choose so that 64*LIMBS >= max sequence length.
 // L_MIN: minimum overlap length (must be <= 32 for the seed-key fits-in-u64 invariant).
 
-pub fn build_overlap_graph<const LIMBS: usize>(seqs: &[&[u8]], l_min: u32) -> Vec<Edge> {
+pub fn build_overlap_graph<const LIMBS: usize>(seqs: &[&[u8]], l_min: u32, _assembly_method: AssemblyMethod) -> Vec<Edge> {
     assert!(
         (1..=32).contains(&l_min),
         "l_min must fit in a u64 seed (<=32)"
@@ -495,7 +501,7 @@ fn main() {
     );
 
     let seq_refs: Vec<&[u8]> = seqs.iter().map(|s| s.as_slice()).collect();
-    let edges = build_overlap_graph::<LIMBS>(&seq_refs, l_min);
+    let edges = build_overlap_graph::<LIMBS>(&seq_refs, l_min, AssemblyMethod::All);
     eprintln!("found {} edges", edges.len());
 
     let result = match gfa_path {
@@ -523,7 +529,7 @@ mod tests {
     fn fwd_fwd_overlap() {
         let s0: &[u8] = b"ACGTACGTACGT"; // tail "ACGTACGT"
         let s1: &[u8] = b"ACGTACGTGGGGGG"; // head "ACGTACGT"
-        let edges = build_overlap_graph::<1>(&[s0, s1], 6);
+        let edges = build_overlap_graph::<1>(&[s0, s1], 6, AssemblyMethod::All);
         assert!(edges.iter().any(|e| e.from_id == 0
             && e.to_id == 1
             && e.from_strand == Strand::Fwd
@@ -536,7 +542,7 @@ mod tests {
         // S1 contains S0 as an internal substring -> NOT a valid suffix-prefix overlap
         let s0: &[u8] = b"ACGTACGT";
         let s1: &[u8] = b"GGGGACGTACGTGGGG";
-        let edges = build_overlap_graph::<1>(&[s0, s1], 6);
+        let edges = build_overlap_graph::<1>(&[s0, s1], 6, AssemblyMethod::All);
         // No edge between 0 and 1 in either direction
         assert!(!edges
             .iter()
@@ -547,7 +553,7 @@ mod tests {
     fn fwd_rev_overlap() {
         let s0: &[u8] = b"AACCGGTTAACCGG";
         let s1: &[u8] = b"GGGGGGCCGGTTAA";
-        let edges = build_overlap_graph::<1>(&[s0, s1], 6);
+        let edges = build_overlap_graph::<1>(&[s0, s1], 6, AssemblyMethod::All);
         assert!(
             edges.iter().any(|e| e.from_id == 0
                 && e.to_id == 1
@@ -586,7 +592,7 @@ mod tests {
         // In scan: p_fwd=0, rc_key = revcomp(A[0..6]) = "CCGGTT", matches B fwd prefix
         let a: &[u8] = b"AACCGGTTTT";
         let b: &[u8] = b"CCGGTTGGGG";
-        let edges = build_overlap_graph::<1>(&[a, b], 6);
+        let edges = build_overlap_graph::<1>(&[a, b], 6, AssemblyMethod::All);
         assert!(
             edges.iter().any(|e| {
                 (e.from_id == 0
@@ -608,7 +614,7 @@ mod tests {
     #[test]
     fn self_overlap_tandem_repeat() {
         let s: &[u8] = b"ACGTACGTACGT";
-        let edges = build_overlap_graph::<1>(&[s], 4);
+        let edges = build_overlap_graph::<1>(&[s], 4, AssemblyMethod::All);
         assert!(
             edges
                 .iter()
@@ -632,7 +638,7 @@ mod tests {
         // s suffix at p=4: "AACCGGTT" (8bp). RC prefix[0..8]: "AACCGGTT". MATCH!
         // Edge: 0+ -> 0- with overlap 8.
         let s: &[u8] = b"AACCAACCGGTT";
-        let edges = build_overlap_graph::<1>(&[s], 6);
+        let edges = build_overlap_graph::<1>(&[s], 6, AssemblyMethod::All);
         assert!(
             edges.iter().any(|e| e.from_id == 0
                 && e.to_id == 0
@@ -649,7 +655,7 @@ mod tests {
         let s0: &[u8] = b"ACGTACGTCCCC";
         let s1: &[u8] = b"ACGTCCCCGGGG";
         let s2: &[u8] = b"CCCCGGGGACGT";
-        let edges = build_overlap_graph::<1>(&[s0, s1, s2], 4);
+        let edges = build_overlap_graph::<1>(&[s0, s1, s2], 4, AssemblyMethod::All);
 
         let has_edge = |from: u32, fs: Strand, to: u32, ts: Strand, ov: u32| -> bool {
             edges.iter().any(|e| {
