@@ -11,7 +11,7 @@ pub enum EdgeKind {
 }
 
 impl EdgeKind {
-    fn color(self) -> &'static str {
+    fn colour(self) -> &'static str {
         match self {
             EdgeKind::FwdFwd => "#4ade80",
             EdgeKind::FwdRev => "#6aa9ff",
@@ -49,15 +49,15 @@ pub struct GraphData {
     pub connected: Vec<bool>,
 }
 
-const COMPONENT_COLORS: &[&str] = &[
+const COMPONENT_COLOURS: &[&str] = &[
     "#60a5fa", "#4ade80", "#fbbf24", "#f87171", "#67e8f9", "#34d399", "#fb923c", "#c084fc",
     "#f472b6", "#818cf8", "#a3e635", "#fb7185",
 ];
 
-fn component_color(comp: Option<usize>) -> &'static str {
+fn component_colour(comp: Option<usize>) -> &'static str {
     match comp {
         None => "#9ca3af",
-        Some(i) => COMPONENT_COLORS[i % COMPONENT_COLORS.len()],
+        Some(i) => COMPONENT_COLOURS[i % COMPONENT_COLOURS.len()],
     }
 }
 
@@ -236,7 +236,7 @@ pub fn GraphView(graph: GraphData, highlight_comp: ReadSignal<Option<usize>>) ->
                             }
                             let (x1, y1) = p.get(from).copied().unwrap_or((0.0, 0.0));
                             let (x2, y2) = p.get(to).copied().unwrap_or((0.0, 0.0));
-                            let color = e.kind.color();
+                            let colour = e.kind.colour();
                             let sw = (e.overlap as f32 / 8.0).clamp(0.6, 3.5);
                             
                             let comp_from = comps[from];
@@ -264,7 +264,7 @@ pub fn GraphView(graph: GraphData, highlight_comp: ReadSignal<Option<usize>>) ->
                                     <path
                                         d=path
                                         fill="none"
-                                        stroke=color
+                                        stroke=colour
                                         stroke-width=stroke_width
                                         opacity=opacity
                                         style="transition: opacity 0.2s, stroke-width 0.2s;"
@@ -280,7 +280,7 @@ pub fn GraphView(graph: GraphData, highlight_comp: ReadSignal<Option<usize>>) ->
                                         y1=y1
                                         x2=x2
                                         y2=y2
-                                        stroke=color
+                                        stroke=colour
                                         stroke-width=stroke_width
                                         opacity=opacity
                                         style="transition: opacity 0.2s, stroke-width 0.2s;"
@@ -310,7 +310,7 @@ pub fn GraphView(graph: GraphData, highlight_comp: ReadSignal<Option<usize>>) ->
                             return None;
                         }
                         let (x, y) = p.get(i).copied().unwrap_or((0.0, 0.0));
-                        let color = component_color(comps[i]);
+                        let colour = component_colour(comps[i]);
                         let length = lens[i];
                         
                         let comp = comps[i];
@@ -339,7 +339,7 @@ pub fn GraphView(graph: GraphData, highlight_comp: ReadSignal<Option<usize>>) ->
                                 cx=x
                                 cy=y
                                 r=radius
-                                fill=color
+                                fill=colour
                                 stroke="#1e2330"
                                 stroke-width="1.2"
                                 opacity=opacity
@@ -423,27 +423,29 @@ fn Legend() -> impl IntoView {
         <div style="display:flex; flex-wrap:wrap; align-items: center; gap:1.25rem; margin-top:1.25rem; padding: 0.75rem 1rem; background: rgba(0,0,0,0.15); border-radius: 6px; font-size: 0.75rem;">
             <div style="display: flex; align-items: center; gap: 0.75rem;">
                 <span style="color:var(--muted); text-transform: uppercase; letter-spacing: 0.05em; font-weight: 600;">"Edges"</span>
-                <LegendSwatch color=EdgeKind::FwdFwd.color() label=EdgeKind::FwdFwd.label() />
-                <LegendSwatch color=EdgeKind::FwdRev.color() label=EdgeKind::FwdRev.label() />
-                <LegendSwatch color=EdgeKind::RevFwd.color() label=EdgeKind::RevFwd.label() />
-                <LegendSwatch color=EdgeKind::RevRev.color() label=EdgeKind::RevRev.label() />
+                <LegendSwatch colour=EdgeKind::FwdFwd.colour() label=EdgeKind::FwdFwd.label() />
+                <LegendSwatch colour=EdgeKind::FwdRev.colour() label=EdgeKind::FwdRev.label() />
+                <LegendSwatch colour=EdgeKind::RevFwd.colour() label=EdgeKind::RevFwd.label() />
+                <LegendSwatch colour=EdgeKind::RevRev.colour() label=EdgeKind::RevRev.label() />
             </div>
             <div style="height: 12px; width: 1px; background: var(--border);"></div>
             <div style="display: flex; align-items: center; gap: 0.5rem;">
                 <span style="color:var(--muted); text-transform: uppercase; letter-spacing: 0.05em; font-weight: 600;">"Nodes"</span>
-                <span style="color: var(--text);">"Colored by connected component"</span>
+                <span style="color: var(--text);">"Coloured by connected component"</span>
             </div>
         </div>
     }
 }
 
 #[component]
-fn LegendSwatch(color: &'static str, label: &'static str) -> impl IntoView {
+fn LegendSwatch(colour: &'static str, label: &'static str) -> impl IntoView {
     view! {
         <span style="display:inline-flex; align-items:center; gap:0.4rem; background: rgba(255,255,255,0.03); padding: 0.2rem 0.5rem; border-radius: 4px; border: 1px solid rgba(255,255,255,0.03);">
-            <span style=move || format!("display:inline-block; width:10px; height:10px; border-radius: 2px; background:{};", color)></span>
+            <span style=move || format!("display:inline-block; width:10px; height:10px; border-radius: 2px; background:{};", colour)></span>
             <span style="color: var(--text); font-family: var(--font-mono); font-size: 0.7rem;">{label}</span>
         </span>
     }
 }
+
+
 

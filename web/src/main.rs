@@ -46,7 +46,7 @@ struct GraphLayoutInput {
     has_edge: Vec<bool>,
 }
 
-fn analyze_stats(
+fn analyse_stats(
     content: &str,
     l_min: u32,
     method: AssemblyMethod,
@@ -203,7 +203,7 @@ fn App() -> impl IntoView {
 
     let file_input_ref: NodeRef<leptos::html::Input> = NodeRef::new();
 
-    let on_analyze = move |_| {
+    let on_analyse = move |_| {
         let Some(input) = file_input_ref.get() else {
             set_error.set(Some("File input not ready".into()));
             return;
@@ -234,7 +234,7 @@ fn App() -> impl IntoView {
 
         spawn_local(async move {
             match gloo_file::futures::read_as_text(&blob).await {
-                Ok(text) => match analyze_stats(&text, l, m) {
+                Ok(text) => match analyse_stats(&text, l, m) {
                     Ok((a, graph_result)) => {
                         set_analysis.set(Some(a));
                         match graph_result {
@@ -273,10 +273,8 @@ fn App() -> impl IntoView {
                                     .filter(|p| !p.is_empty())
                                     .collect();
 
-                                let seed = layout::path_seeded_positions(
-                                    connected_n,
-                                    &compact_paths,
-                                );
+                                let seed =
+                                    layout::path_seeded_positions(connected_n, &compact_paths);
                                 let compact_pos = layout::fruchterman_reingold(
                                     connected_n,
                                     &compact_edges,
@@ -294,7 +292,11 @@ fn App() -> impl IntoView {
                                     .iter()
                                     .map(|p| p.1)
                                     .fold(f32::NEG_INFINITY, f32::max);
-                                let iso_base_y = if max_y.is_finite() { max_y + 100.0 } else { 0.0 };
+                                let iso_base_y = if max_y.is_finite() {
+                                    max_y + 100.0
+                                } else {
+                                    0.0
+                                };
                                 let mut iso_k = 0usize;
                                 for i in 0..li.n {
                                     if !li.has_edge[i] {
@@ -397,8 +399,8 @@ fn App() -> impl IntoView {
                             <option value="pca">"pca"</option>
                         </select>
                     </div>
-                    <button on:click=on_analyze prop:disabled=move || busy.get()>
-                        {move || if busy.get() { "Analyzing…" } else { "Analyze" }}
+                    <button on:click=on_analyse prop:disabled=move || busy.get()>
+                        {move || if busy.get() { "analysing…" } else { "analyse" }}
                     </button>
                 </div>
                 {move || error.get().map(|e| view! { <div class="err">{e}</div> })}
@@ -452,7 +454,7 @@ fn Logo() -> impl IntoView {
                             <line x1="14" y1="10" x2="30" y2="10" stroke="currentColor" stroke-width="1.2" opacity="0.25"/>
                             <line x1="14" y1="22" x2="30" y2="22" stroke="currentColor" stroke-width="1.2" opacity="0.25"/>
                             <line x1="14" y1="34" x2="30" y2="34" stroke="currentColor" stroke-width="1.2" opacity="0.25"/>
-                            
+
                             <path d="M 16 4 C 34 4, 34 16, 22 16 S 10 28, 22 28 S 34 40, 16 40" fill="none" stroke="#4ade80" stroke-width="2.8" stroke-linecap="round"/>
                             <path d="M 28 4 C 10 4, 10 16, 22 16 S 34 28, 22 28 S 10 40, 28 40" fill="none" stroke="#60a5fa" stroke-width="2.8" stroke-linecap="round"/>
                         </g>
@@ -461,7 +463,7 @@ fn Logo() -> impl IntoView {
                             <line class="logo-edge" x1="39" y1="22" x2="22" y2="39" stroke="currentColor" stroke-width="1.5" opacity="0.15"/>
                             <line class="logo-edge-flow" x1="22" y1="5"  x2="5"  y2="22" stroke="var(--accent)" stroke-width="1.5" stroke-linecap="round"/>
                             <line class="logo-edge-flow" x1="39" y1="22" x2="22" y2="39" stroke="var(--accent)" stroke-width="1.5" stroke-linecap="round"/>
-                            
+
                             <circle cx="22" cy="5"  r="5.5" fill="#4ade80" stroke="#0b0d11" stroke-width="2"/>
                             <circle cx="5"  cy="22" r="5.5" fill="#60a5fa" stroke="#0b0d11" stroke-width="2"/>
                             <circle cx="39" cy="22" r="5.5" fill="#fbbf24" stroke="#0b0d11" stroke-width="2"/>
@@ -576,7 +578,7 @@ fn Results(analysis: Analysis, set_highlight_comp: WriteSignal<Option<usize>>) -
                 </h2>
                 {stat_grid}
             </section>
-            
+
             <section class="panel" style="padding: 0; overflow: hidden;">
                 <div style="padding: 1.25rem 1.5rem; border-bottom: 1px solid var(--border);">
                     <h2 style="display: flex; align-items: center; gap: 0.5rem;">
@@ -610,7 +612,6 @@ fn Results(analysis: Analysis, set_highlight_comp: WriteSignal<Option<usize>>) -
         </div>
     }
 }
-
 
 fn main() {
     console_error_panic_hook::set_once();
