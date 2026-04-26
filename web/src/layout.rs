@@ -45,7 +45,7 @@ pub fn fruchterman_reingold(
     if n_nodes == 0 {
         return Vec::new();
     }
-    let area = 1000.0_f32 * 1000.0_f32;
+    let area = 500.0_f32 * 500.0_f32;
     let k = (area / n_nodes as f32).sqrt();
 
     let mut pos: Vec<(f32, f32)> = match initial_positions {

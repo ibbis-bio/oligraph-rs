@@ -45,16 +45,18 @@ pub struct GraphData {
     pub components: Vec<Option<usize>>,
     pub n_components: usize,
     pub initial_positions: Vec<(f32, f32)>,
+    pub initial_viewbox: (f32, f32, f32, f32),
+    pub connected: Vec<bool>,
 }
 
 const COMPONENT_COLORS: &[&str] = &[
-    "#5470c6", "#91cc75", "#fac858", "#ee6666", "#73c0de", "#3ba272", "#fc8452", "#9a60b4",
-    "#ea7ccc", "#2f4b7c", "#a0d911", "#fa541c",
+    "#60a5fa", "#4ade80", "#fbbf24", "#f87171", "#67e8f9", "#34d399", "#fb923c", "#c084fc",
+    "#f472b6", "#818cf8", "#a3e635", "#fb7185",
 ];
 
 fn component_color(comp: Option<usize>) -> &'static str {
     match comp {
-        None => "#6b7280",
+        None => "#9ca3af",
         Some(i) => COMPONENT_COLORS[i % COMPONENT_COLORS.len()],
     }
 }
@@ -82,15 +84,20 @@ pub fn GraphView(graph: GraphData) -> impl IntoView {
     let n = graph.n_nodes;
     let n_components = graph.n_components;
     let positions = RwSignal::new(graph.initial_positions.clone());
-    let bb = layout::bounding_box(&graph.initial_positions);
-    let viewbox = RwSignal::new(bb);
+    let viewbox = RwSignal::new(graph.initial_viewbox);
     let drag = StoredValue::new(DragState::None);
     let svg_ref: NodeRef<leptos::svg::Svg> = NodeRef::new();
 
     let initial_positions = StoredValue::new(graph.initial_positions.clone());
+    let initial_viewbox = StoredValue::new(graph.initial_viewbox);
     let edges = StoredValue::new(graph.edges);
     let components = StoredValue::new(graph.components);
     let seq_lengths = StoredValue::new(graph.seq_lengths);
+    let connected = StoredValue::new(graph.connected);
+    let hide_isolated = RwSignal::new(true);
+
+    let n_isolated =
+        connected.with_value(|c| c.iter().filter(|&&v| !v).count());
 
     let svg_rect = move || -> Option<(f32, f32, f32, f32)> {
         svg_ref.get_untracked().map(|el| {
@@ -184,11 +191,27 @@ pub fn GraphView(graph: GraphData) -> impl IntoView {
         });
     };
 
+    // Restore seeded positions and zoom to the largest contig.
     let reset_view = move |_| {
         let init = initial_positions.with_value(|p| p.clone());
-        let new_bb = layout::bounding_box(&init);
-        viewbox.set(new_bb);
         positions.set(init);
+        viewbox.set(initial_viewbox.get_value());
+    };
+
+    // Fit visible node positions in view without moving nodes.
+    let view_all = move |_| {
+        let p = positions.get_untracked();
+        let hide = hide_isolated.get_untracked();
+        let pts: Vec<(f32, f32)> = connected.with_value(|c| {
+            p.iter()
+                .enumerate()
+                .filter(|&(i, _)| !hide || c.get(i).copied().unwrap_or(false))
+                .map(|(_, &pos)| pos)
+                .collect()
+        });
+        if !pts.is_empty() {
+            viewbox.set(layout::bounding_box(&pts));
+        }
     };
 
     let viewbox_attr = move || {
@@ -198,66 +221,82 @@ pub fn GraphView(graph: GraphData) -> impl IntoView {
 
     let edge_lines = move || {
         let p = positions.get();
+        let hide = hide_isolated.get();
         edges.with_value(|edges_vec| {
-            edges_vec
-                .iter()
-                .map(|e| {
-                    let from = e.from as usize;
-                    let to = e.to as usize;
-                    let (x1, y1) = p.get(from).copied().unwrap_or((0.0, 0.0));
-                    let (x2, y2) = p.get(to).copied().unwrap_or((0.0, 0.0));
-                    let color = e.kind.color();
-                    let sw = (e.overlap as f32 / 8.0).clamp(0.6, 3.5);
-                    let title_text = format!(
-                        "{} → {}  ({}, overlap {} bp)",
-                        from,
-                        to,
-                        e.kind.label(),
-                        e.overlap
-                    );
-                    if from == to {
-                        let r = 8.0;
-                        let path =
-                            format!("M {} {} a {r} {r} 0 1 1 {} {}", x1 + r, y1, -2.0 * r, 0.001);
-                        view! {
-                            <path
-                                d=path
-                                fill="none"
-                                stroke=color
-                                stroke-width=sw
-                                opacity="0.7"
-                            >
-                                <title>{title_text}</title>
-                            </path>
+            connected.with_value(|conn| {
+                edges_vec
+                    .iter()
+                    .filter_map(|e| {
+                        let from = e.from as usize;
+                        let to = e.to as usize;
+                        if hide && !conn.get(from).copied().unwrap_or(false) {
+                            return None;
                         }
-                        .into_any()
-                    } else {
-                        view! {
-                            <line
-                                x1=x1
-                                y1=y1
-                                x2=x2
-                                y2=y2
-                                stroke=color
-                                stroke-width=sw
-                                opacity="0.55"
-                            >
-                                <title>{title_text}</title>
-                            </line>
-                        }
-                        .into_any()
-                    }
-                })
-                .collect::<Vec<_>>()
+                        let (x1, y1) = p.get(from).copied().unwrap_or((0.0, 0.0));
+                        let (x2, y2) = p.get(to).copied().unwrap_or((0.0, 0.0));
+                        let color = e.kind.color();
+                        let sw = (e.overlap as f32 / 8.0).clamp(0.6, 3.5);
+                        let title_text = format!(
+                            "{} → {}  ({}, overlap {} bp)",
+                            from,
+                            to,
+                            e.kind.label(),
+                            e.overlap
+                        );
+                        Some(if from == to {
+                            let r = 8.0;
+                            let path = format!(
+                                "M {} {} a {r} {r} 0 1 1 {} {}",
+                                x1 + r,
+                                y1,
+                                -2.0 * r,
+                                0.001
+                            );
+                            view! {
+                                <path
+                                    d=path
+                                    fill="none"
+                                    stroke=color
+                                    stroke-width=sw
+                                    opacity="0.85"
+                                >
+                                    <title>{title_text}</title>
+                                </path>
+                            }
+                            .into_any()
+                        } else {
+                            view! {
+                                <line
+                                    x1=x1
+                                    y1=y1
+                                    x2=x2
+                                    y2=y2
+                                    stroke=color
+                                    stroke-width=sw
+                                    opacity="0.75"
+                                >
+                                    <title>{title_text}</title>
+                                </line>
+                            }
+                            .into_any()
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            })
         })
     };
 
     let node_circles = move || {
         let p = positions.get();
-        components.with_value(|comps| {
+        let hide = hide_isolated.get();
+        connected.with_value(|conn| {
+            components.with_value(|comps| {
             seq_lengths.with_value(|lens| {
                 (0..n)
-                    .map(|i| {
+                    .filter_map(|i| {
+                        if hide && !conn.get(i).copied().unwrap_or(false) {
+                            return None;
+                        }
                         let (x, y) = p.get(i).copied().unwrap_or((0.0, 0.0));
                         let color = component_color(comps[i]);
                         let length = lens[i];
@@ -277,22 +316,23 @@ pub fn GraphView(graph: GraphData) -> impl IntoView {
                                 start_client_y: ev.client_y() as f32,
                             });
                         };
-                        view! {
+                        Some(view! {
                             <circle
                                 cx=x
                                 cy=y
-                                r="5"
+                                r="7"
                                 fill=color
-                                stroke="#0a0c10"
+                                stroke="#1e2330"
                                 stroke-width="1.2"
                                 style="cursor:grab;"
                                 on:pointerdown=on_node_down
                             >
                                 <title>{title_text}</title>
                             </circle>
-                        }
+                        })
                     })
                     .collect::<Vec<_>>()
+            })
             })
         })
     };
@@ -301,7 +341,20 @@ pub fn GraphView(graph: GraphData) -> impl IntoView {
         <section class="panel">
             <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.5rem;">
                 <h2 style="margin:0; font-size:1.1rem;">"Overlap graph"</h2>
-                <button on:click=reset_view style="font-size:0.85rem; padding:0.3rem 0.7rem;">"Reset layout"</button>
+                <div style="display:flex; gap:0.5rem;">
+                    <button
+                        on:click=move |_| hide_isolated.update(|v| *v = !*v)
+                        style="font-size:0.85rem; padding:0.3rem 0.7rem;"
+                    >
+                        {move || if hide_isolated.get() {
+                            format!("Show isolated ({})", n_isolated)
+                        } else {
+                            format!("Hide isolated ({})", n_isolated)
+                        }}
+                    </button>
+                    <button on:click=view_all style="font-size:0.85rem; padding:0.3rem 0.7rem;">"View all"</button>
+                    <button on:click=reset_view style="font-size:0.85rem; padding:0.3rem 0.7rem;">"Reset layout"</button>
+                </div>
             </div>
             <div style="font-size:0.8rem; color:var(--muted); margin-bottom:0.5rem;">
                 "Drag nodes · drag background to pan · scroll to zoom · "

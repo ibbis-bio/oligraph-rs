@@ -1,17 +1,17 @@
 mod graph_view;
 mod layout;
 
+use gloo_timers::future::TimeoutFuture;
 use graph_view::{EdgeKind, EdgeView, GraphData, GraphView};
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use oligraph_rs::{
-    assemble_contigs, build_overlap_graph, parse_fasta_str, AssemblyMethod, Contig, Strand,
-    Topology, LIMBS,
+    assemble_contigs, build_overlap_graph, parse_fasta_str, AssemblyMethod, Strand, Topology, LIMBS,
 };
 use wasm_bindgen::JsCast;
 use web_sys::HtmlInputElement;
 
-const MAX_GRAPH_NODES: usize = 5000;
+const MAX_GRAPH_NODES: usize = 10000;
 
 #[derive(Clone)]
 struct Analysis {
@@ -22,8 +22,6 @@ struct Analysis {
     edge_count: usize,
     isolated_count: usize,
     contigs: Vec<ContigSummary>,
-    graph: Option<GraphData>,
-    graph_skipped_reason: Option<String>,
 }
 
 #[derive(Clone)]
@@ -34,9 +32,25 @@ struct ContigSummary {
     length: usize,
     topology: Topology,
     branches: u32,
+    fasta: String,
 }
 
-fn analyze(content: &str, l_min: u32, method: AssemblyMethod) -> Result<Analysis, String> {
+struct GraphLayoutInput {
+    n: usize,
+    seq_lengths: Vec<usize>,
+    edge_views: Vec<EdgeView>,
+    node_components: Vec<Option<usize>>,
+    n_components: usize,
+    edge_pairs: Vec<(u32, u32)>,
+    contig_paths: Vec<Vec<u32>>,
+    has_edge: Vec<bool>,
+}
+
+fn analyze_stats(
+    content: &str,
+    l_min: u32,
+    method: AssemblyMethod,
+) -> Result<(Analysis, Result<GraphLayoutInput, String>), String> {
     let (seqs, skipped) = parse_fasta_str(content);
     if seqs.is_empty() {
         return Err("No valid sequences found in FASTA".into());
@@ -73,13 +87,24 @@ fn analyze(content: &str, l_min: u32, method: AssemblyMethod) -> Result<Analysis
     let summaries: Vec<ContigSummary> = contigs
         .iter()
         .enumerate()
-        .map(|(i, c): (usize, &Contig)| ContigSummary {
-            index: i,
-            component: c.component,
-            oligos: c.path.len(),
-            length: c.sequence.len(),
-            topology: c.topology,
-            branches: c.branches,
+        .map(|(i, c)| {
+            let header = format!(
+                ">contig_{} component={} oligos={} length={}",
+                i,
+                c.component,
+                c.path.len(),
+                c.sequence.len()
+            );
+            let seq_str = String::from_utf8_lossy(&c.sequence).into_owned();
+            ContigSummary {
+                index: i,
+                component: c.component,
+                oligos: c.path.len(),
+                length: c.sequence.len(),
+                topology: c.topology,
+                branches: c.branches,
+                fasta: format!("{}\n{}\n", header, seq_str),
+            }
         })
         .collect();
 
@@ -99,14 +124,11 @@ fn analyze(content: &str, l_min: u32, method: AssemblyMethod) -> Result<Analysis
     }
     let n_components = if contigs.is_empty() { 0 } else { max_comp + 1 };
 
-    let (graph, graph_skipped_reason) = if n > MAX_GRAPH_NODES {
-        (
-            None,
-            Some(format!(
-                "Graph view skipped: {} sequences exceeds limit of {}.",
-                n, MAX_GRAPH_NODES
-            )),
-        )
+    let graph_result = if n > MAX_GRAPH_NODES {
+        Err(format!(
+            "Graph view skipped: {} sequences exceeds limit of {}.",
+            n, MAX_GRAPH_NODES
+        ))
     } else {
         let edge_views: Vec<EdgeView> = edges
             .iter()
@@ -117,41 +139,36 @@ fn analyze(content: &str, l_min: u32, method: AssemblyMethod) -> Result<Analysis
                 kind: edge_kind_from(e.from_strand, e.to_strand),
             })
             .collect();
-
         let edge_pairs: Vec<(u32, u32)> = edges.iter().map(|e| (e.from_id, e.to_id)).collect();
         let contig_paths: Vec<Vec<u32>> = contigs
             .iter()
             .map(|c| c.path.iter().map(|&(id, _)| id).collect())
             .collect();
-        let seed = layout::path_seeded_positions(n, &contig_paths);
-        let positions = layout::fruchterman_reingold(n, &edge_pairs, 60, Some(seed));
-
         let seq_lengths: Vec<usize> = seqs.iter().map(|s| s.len()).collect();
-
-        (
-            Some(GraphData {
-                n_nodes: n,
-                seq_lengths,
-                edges: edge_views,
-                components: node_components,
-                n_components,
-                initial_positions: positions,
-            }),
-            None,
-        )
+        Ok(GraphLayoutInput {
+            n,
+            seq_lengths,
+            edge_views,
+            node_components,
+            n_components,
+            edge_pairs,
+            contig_paths,
+            has_edge,
+        })
     };
 
-    Ok(Analysis {
-        input_count: n,
-        skipped,
-        len_min: min_len,
-        len_max: max_len,
-        edge_count: edges.len(),
-        isolated_count,
-        contigs: summaries,
-        graph,
-        graph_skipped_reason,
-    })
+    Ok((
+        Analysis {
+            input_count: n,
+            skipped,
+            len_min: min_len,
+            len_max: max_len,
+            edge_count: edges.len(),
+            isolated_count,
+            contigs: summaries,
+        },
+        graph_result,
+    ))
 }
 
 fn edge_kind_from(from: Strand, to: Strand) -> EdgeKind {
@@ -170,6 +187,9 @@ fn App() -> impl IntoView {
     let (busy, set_busy) = signal(false);
     let (error, set_error) = signal::<Option<String>>(None);
     let (analysis, set_analysis) = signal::<Option<Analysis>>(None);
+    let (graph, set_graph) = signal::<Option<GraphData>>(None);
+    let (graph_skip, set_graph_skip) = signal::<Option<String>>(None);
+    let (layout_busy, set_layout_busy) = signal(false);
     let (filename, set_filename) = signal::<Option<String>>(None);
 
     let file_input_ref: NodeRef<leptos::html::Input> = NodeRef::new();
@@ -192,6 +212,8 @@ fn App() -> impl IntoView {
         set_busy.set(true);
         set_error.set(None);
         set_analysis.set(None);
+        set_graph.set(None);
+        set_graph_skip.set(None);
 
         let l = l_min.get_untracked();
         let m = match method.get_untracked().as_str() {
@@ -203,13 +225,119 @@ fn App() -> impl IntoView {
 
         spawn_local(async move {
             match gloo_file::futures::read_as_text(&blob).await {
-                Ok(text) => match analyze(&text, l, m) {
-                    Ok(a) => set_analysis.set(Some(a)),
-                    Err(e) => set_error.set(Some(e)),
+                Ok(text) => match analyze_stats(&text, l, m) {
+                    Ok((a, graph_result)) => {
+                        set_analysis.set(Some(a));
+                        match graph_result {
+                            Ok(li) => {
+                                set_layout_busy.set(true);
+                                TimeoutFuture::new(0).await;
+
+                                // Compact to connected-only nodes so isolated nodes
+                                // don't participate in the O(n²) F-R repulsion.
+                                let connected_indices: Vec<usize> =
+                                    (0..li.n).filter(|&i| li.has_edge[i]).collect();
+                                let connected_n = connected_indices.len();
+                                let mut old_to_new = vec![None::<usize>; li.n];
+                                for (ni, &oi) in connected_indices.iter().enumerate() {
+                                    old_to_new[oi] = Some(ni);
+                                }
+                                let compact_edges: Vec<(u32, u32)> = li
+                                    .edge_pairs
+                                    .iter()
+                                    .filter_map(|&(u, v)| {
+                                        let nu = old_to_new[u as usize]?;
+                                        let nv = old_to_new[v as usize]?;
+                                        Some((nu as u32, nv as u32))
+                                    })
+                                    .collect();
+                                let compact_paths: Vec<Vec<u32>> = li
+                                    .contig_paths
+                                    .iter()
+                                    .map(|p| {
+                                        p.iter()
+                                            .filter_map(|&id| {
+                                                old_to_new[id as usize].map(|ni| ni as u32)
+                                            })
+                                            .collect::<Vec<_>>()
+                                    })
+                                    .filter(|p| !p.is_empty())
+                                    .collect();
+
+                                let seed = layout::path_seeded_positions(
+                                    connected_n,
+                                    &compact_paths,
+                                );
+                                let compact_pos = layout::fruchterman_reingold(
+                                    connected_n,
+                                    &compact_edges,
+                                    60,
+                                    Some(seed),
+                                );
+
+                                // Expand back: place isolated nodes in a grid below
+                                // the connected graph so they don't pile at the origin.
+                                let mut positions = vec![(0.0_f32, 0.0_f32); li.n];
+                                for (ni, &oi) in connected_indices.iter().enumerate() {
+                                    positions[oi] = compact_pos[ni];
+                                }
+                                let max_y = compact_pos
+                                    .iter()
+                                    .map(|p| p.1)
+                                    .fold(f32::NEG_INFINITY, f32::max);
+                                let iso_base_y = if max_y.is_finite() { max_y + 100.0 } else { 0.0 };
+                                let mut iso_k = 0usize;
+                                for i in 0..li.n {
+                                    if !li.has_edge[i] {
+                                        positions[i] = (
+                                            (iso_k % 10) as f32 * 60.0,
+                                            iso_base_y + (iso_k / 10) as f32 * 60.0,
+                                        );
+                                        iso_k += 1;
+                                    }
+                                }
+
+                                let initial_viewbox = compact_paths
+                                    .iter()
+                                    .max_by_key(|p| p.len())
+                                    .filter(|p| !p.is_empty())
+                                    .map(|path| {
+                                        let pts: Vec<(f32, f32)> = path
+                                            .iter()
+                                            .filter_map(|&id| compact_pos.get(id as usize).copied())
+                                            .collect();
+                                        layout::bounding_box(&pts)
+                                    })
+                                    .unwrap_or_else(|| layout::bounding_box(&compact_pos));
+
+                                set_graph.set(Some(GraphData {
+                                    n_nodes: li.n,
+                                    seq_lengths: li.seq_lengths,
+                                    edges: li.edge_views,
+                                    components: li.node_components,
+                                    n_components: li.n_components,
+                                    initial_positions: positions,
+                                    initial_viewbox,
+                                    connected: li.has_edge,
+                                }));
+                                set_layout_busy.set(false);
+                            }
+                            Err(skip_reason) => {
+                                set_graph_skip.set(Some(skip_reason));
+                            }
+                        }
+                        set_busy.set(false);
+                    }
+                    Err(e) => {
+                        set_error.set(Some(e));
+                        set_busy.set(false);
+                    }
                 },
-                Err(e) => set_error.set(Some(format!("File read failed: {}", e))),
+                Err(e) => {
+                    set_error.set(Some(format!("File read failed: {}", e)));
+                    set_busy.set(false);
+                }
             }
-            set_busy.set(false);
         });
     };
 
@@ -254,7 +382,7 @@ fn App() -> impl IntoView {
                         <label>"assembly method"</label>
                         <select on:change=on_method_change prop:value=move || method.get()>
                             <option value="all">"all"</option>
-                            <option value="pca">"pca (3'-3' only)"</option>
+                            <option value="pca">"pca"</option>
                         </select>
                     </div>
                     <button on:click=on_analyze prop:disabled=move || busy.get()>
@@ -269,16 +397,20 @@ fn App() -> impl IntoView {
                 })}
             </section>
 
-            {move || analysis.get().map(|a| {
-                let graph = a.graph.clone();
-                let skipped_reason = a.graph_skipped_reason.clone();
-                view! {
-                    <Results analysis=a />
-                    {graph.map(|g| view! { <GraphView graph=g /> })}
-                    {skipped_reason.map(|r| view! {
-                        <section class="panel"><p style="color:var(--muted); margin:0;">{r}</p></section>
-                    })}
-                }
+            {move || analysis.get().map(|a| view! { <Results analysis=a /> })}
+
+            {move || layout_busy.get().then(|| view! {
+                <section class="panel">
+                    <p style="color:var(--muted); margin:0;">"Computing graph layout…"</p>
+                </section>
+            })}
+
+            {move || graph.get().map(|g| view! { <GraphView graph=g /> })}
+
+            {move || graph_skip.get().map(|r| view! {
+                <section class="panel">
+                    <p style="color:var(--muted); margin:0;">{r}</p>
+                </section>
             })}
         </main>
     }
@@ -305,6 +437,11 @@ fn Results(analysis: Analysis) -> impl IntoView {
                 Topology::Linear => "linear",
                 Topology::Cyclic => "cyclic",
             };
+            let href = format!(
+                "data:text/plain;charset=utf-8,{}",
+                js_sys::encode_uri_component(&c.fasta)
+            );
+            let dl_name = format!("contig_{}.fasta", c.index);
             view! {
                 <tr>
                     <td class="num">{format!("contig_{}", c.index)}</td>
@@ -313,6 +450,13 @@ fn Results(analysis: Analysis) -> impl IntoView {
                     <td class="num">{c.length}</td>
                     <td>{topo}</td>
                     <td class="num">{c.branches}</td>
+                    <td>
+                        <a
+                            href=href
+                            download=dl_name
+                            style="color:var(--accent); font-size:0.85rem;"
+                        >"FASTA"</a>
+                    </td>
                 </tr>
             }
         })
@@ -338,6 +482,7 @@ fn Results(analysis: Analysis) -> impl IntoView {
                                 <th>"length (bp)"</th>
                                 <th>"topology"</th>
                                 <th>"branches"</th>
+                                <th>"download"</th>
                             </tr>
                         </thead>
                         <tbody>{rows}</tbody>
