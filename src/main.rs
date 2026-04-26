@@ -1,12 +1,9 @@
-// Cargo.toml:
-//   rustc-hash = "2"
-//   rayon = "1"          # optional, for parallel seed-extend
-
-use std::env;
 use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::time::Instant;
 
+use clap::Parser;
 use indicatif::{ProgressBar, ProgressStyle};
 use rustc_hash::FxHashMap;
 
@@ -15,10 +12,10 @@ use rustc_hash::FxHashMap;
 // ============================================================
 // A = 00, C = 01, G = 10, T = 11
 // Stored little-endian in u64 limbs: position 0 in bits 0..2 of limb 0, etc.
-// Up to 64bp per limb. 80bp -> [u64; 2] with 48 bits unused in the second limb.
+// LIMBS: choose so that 32*LIMBS >= max sequence length (2 bits/base, 32 bases per u64 limb).
+// 80bp -> [u64; 3] with 16 bits unused in the third limb.
 //
 // We use a const generic over LIMBS so the same code handles different lengths.
-// For your 80bp pool, LIMBS = 2.
 
 const NUC_BAD: u8 = 0xFF;
 
@@ -34,8 +31,8 @@ fn nuc_to_2bit(b: u8) -> u8 {
 }
 
 #[inline]
-fn revcomp_u64(key: u64, len: u32) -> u64 {
-    let mut out = 0u64;
+fn revcomp_seed(key: u128, len: u32) -> u128 {
+    let mut out = 0u128;
     for i in 0..len {
         let base = (key >> (2 * i)) & 0b11;
         out |= (base ^ 0b11) << (2 * (len - 1 - i));
@@ -90,6 +87,15 @@ impl<const LIMBS: usize> Packed<LIMBS> {
         (self.limbs[i / 32] >> ((i % 32) * 2)) & 0b11
     }
 
+    /// Extract up to 64 bases (128 bits) spanning the first two limbs as a u128.
+    /// `mask` selects the relevant bits; e.g. for a 40-base seed use `(1u128 << 80) - 1`.
+    #[inline]
+    fn seed(&self, mask: u128) -> u128 {
+        let lo = self.limbs[0] as u128;
+        let hi = if LIMBS > 1 { self.limbs[1] as u128 } else { 0 };
+        (lo | (hi << 64)) & mask
+    }
+
     /// Compare base ranges: self[a_start..a_start+n]  ==  other[b_start..b_start+n]
     /// SIMD-able; the simple version below is already fast for 80bp.
     fn match_range<const M: usize>(
@@ -136,10 +142,34 @@ pub struct Edge {
     pub overlap_len: u32,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum AssemblyMethod {
     All,
     Pca,
+}
+
+#[derive(Parser)]
+#[command(
+    name = "oligraph",
+    version,
+    about = "Overlap graph builder and contig assembler for oligonucleotide pools",
+)]
+struct Cli {
+    /// Input FASTA file
+    #[arg(short, long)]
+    input: PathBuf,
+
+    /// Output file prefix (writes .gfa, .fasta, .contigs.fasta)
+    #[arg(short, long)]
+    output: PathBuf,
+
+    /// Minimum overlap length in bp [1-64]
+    #[arg(short = 'l', long, default_value_t = 15, value_parser = clap::value_parser!(u32).range(1..=64))]
+    min_overlap: u32,
+
+    /// Assembly method
+    #[arg(short, long, value_enum, default_value_t = AssemblyMethod::All)]
+    method: AssemblyMethod,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -211,16 +241,18 @@ impl UnionFind {
 // Build overlap graph
 // ============================================================
 //
-// LIMBS: choose so that 64*LIMBS >= max sequence length.
-// L_MIN: minimum overlap length (must be <= 32 for the seed-key fits-in-u64 invariant).
+// LIMBS: choose so that 32*LIMBS >= max sequence length (2 bits/base, 32 bases per u64 limb).
+// L_MIN: minimum overlap length (must be <= 64 for the seed-key fits-in-u128 invariant).
 
 pub fn build_overlap_graph<const LIMBS: usize>(seqs: &[&[u8]], l_min: u32, assembly_method: AssemblyMethod) -> Vec<Edge> {
     assert!(
-        (1..=32).contains(&l_min),
-        "l_min must fit in a u64 seed (<=32)"
+        (1..=64).contains(&l_min),
+        "l_min must fit in a u128 seed (<=64)"
     );
 
     let n_seqs = seqs.len();
+
+    let t0 = Instant::now();
 
     // ---- 1. Pack forward + RC ---------------------------------------------
     // packed[0..n_seqs]: forward strands, packed[n_seqs..2*n_seqs]: RC (for verification)
@@ -236,16 +268,16 @@ pub fn build_overlap_graph<const LIMBS: usize>(seqs: &[&[u8]], l_min: u32, assem
     }
     // ---- 2. Index every prefix of length L_min -----------------------------
     //
-    // Key: u64 holding the L_min 2-bit values (low 2*L_min bits).
+    // Key: u128 holding the L_min 2-bit values (low 2*L_min bits).
     // Value: Vec<(seq_id, strand)> — tagged so we know which orientation matched.
 
-    let mask: u64 = if l_min == 32 {
-        u64::MAX
+    let mask: u128 = if l_min == 64 {
+        u128::MAX
     } else {
-        (1u64 << (2 * l_min)) - 1
+        (1u128 << (2 * l_min)) - 1
     };
 
-    let mut prefix_index: FxHashMap<u64, Vec<(u32, Strand)>> =
+    let mut prefix_index: FxHashMap<u128, Vec<(u32, Strand)>> =
         FxHashMap::with_capacity_and_hasher(2 * n_seqs, Default::default());
 
     for i in 0..n_seqs {
@@ -253,19 +285,28 @@ pub fn build_overlap_graph<const LIMBS: usize>(seqs: &[&[u8]], l_min: u32, assem
         if fwd.len < l_min {
             continue;
         }
-        let fwd_key = fwd.limbs[0] & mask;
+        let fwd_key = fwd.seed(mask);
         prefix_index
             .entry(fwd_key)
             .or_default()
             .push((i as u32, Strand::Fwd));
 
         let rc = &packed[n_seqs + i];
-        let rc_key = rc.limbs[0] & mask;
+        let rc_key = rc.seed(mask);
         prefix_index
             .entry(rc_key)
             .or_default()
             .push((i as u32, Strand::Rev));
     }
+
+    let t_index = Instant::now();
+    let total_candidates: usize = prefix_index.values().map(|v| v.len()).sum();
+    eprintln!(
+        "[index]  {:.3}s  ({} unique seeds, {} indexed candidates)",
+        t_index.duration_since(t0).as_secs_f64(),
+        prefix_index.len(),
+        total_candidates
+    );
 
     // ---- 3. Seed-and-extend (single forward scan, dual rolling seeds) ------
     //
@@ -295,8 +336,8 @@ pub fn build_overlap_graph<const LIMBS: usize>(seqs: &[&[u8]], l_min: u32, assem
         let len_a = pa.len;
         let last_p = (len_a - l_min) as usize;
 
-        let mut fwd_key: u64 = pa.limbs[0] & mask;
-        let mut rc_key: u64 = revcomp_u64(fwd_key, l_min);
+        let mut fwd_key: u128 = pa.seed(mask);
+        let mut rc_key: u128 = revcomp_seed(fwd_key, l_min);
 
         for p in 0..=last_p {
             // --- fwd_key lookup: types 1 and 2 ---
@@ -371,7 +412,7 @@ pub fn build_overlap_graph<const LIMBS: usize>(seqs: &[&[u8]], l_min: u32, assem
 
             // Roll both seeds forward
             if p < last_p {
-                let new_base = pa.base_at(p + l_min as usize);
+                let new_base = pa.base_at(p + l_min as usize) as u128;
                 fwd_key = (fwd_key >> 2) | (new_base << (2 * (l_min - 1)));
                 rc_key = ((rc_key << 2) | (new_base ^ 0b11)) & mask;
             }
@@ -380,8 +421,27 @@ pub fn build_overlap_graph<const LIMBS: usize>(seqs: &[&[u8]], l_min: u32, assem
 
     pb.finish_with_message("done");
 
+    let t_scan = Instant::now();
+    eprintln!(
+        "[scan]   {:.3}s  ({} seqs, {} raw edges)",
+        t_scan.duration_since(t_index).as_secs_f64(),
+        n_seqs,
+        raw.len()
+    );
+
     // ---- 4. Dedup, keep max overlap per canonical edge ---------------------
-    canonicalize_and_dedup(raw)
+    let raw_count = raw.len();
+    let deduped = canonicalize_and_dedup(raw);
+
+    let t_dedup = Instant::now();
+    eprintln!(
+        "[dedup]  {:.3}s  ({} raw -> {} deduped)",
+        t_dedup.duration_since(t_scan).as_secs_f64(),
+        raw_count,
+        deduped.len()
+    );
+
+    deduped
 }
 
 fn canonicalize_and_dedup(edges: Vec<Edge>) -> Vec<Edge> {
@@ -777,7 +837,7 @@ pub fn write_contigs_fasta<W: std::io::Write>(
 
 const LIMBS: usize = 10;
 
-fn parse_fasta(path: &str) -> std::io::Result<Vec<Vec<u8>>> {
+fn parse_fasta(path: &Path) -> std::io::Result<Vec<Vec<u8>>> {
     let file = File::open(path)?;
     let reader = BufReader::new(file);
     let mut seqs: Vec<Vec<u8>> = Vec::new();
@@ -818,90 +878,18 @@ fn parse_fasta(path: &str) -> std::io::Result<Vec<Vec<u8>>> {
     Ok(seqs)
 }
 
-fn usage() -> ! {
-    eprintln!("Usage: oligraph-rs <input.fasta> [output.gfa] [-l <min_overlap>] [--assembly-method <all|pca>]");
-    eprintln!("  input.fasta                Input FASTA file of sequences");
-    eprintln!("  output.gfa                 Output GFA file (default: stdout, GFA only)");
-    eprintln!("                             Also writes .fasta alongside the .gfa");
-    eprintln!("  -l <min>                   Minimum overlap length (default: 20, max: 32)");
-    eprintln!("  --assembly-method <method>  Assembly method filter (default: all)");
-    std::process::exit(1);
-}
 
 fn main() {
-    let args: Vec<String> = env::args().collect();
-    if args.len() < 2 {
-        usage();
-    }
+    let cli = Cli::parse();
 
-    let mut fasta_path: Option<&str> = None;
-    let mut gfa_path: Option<&str> = None;
-    let mut l_min: u32 = 20;
-    let mut assembly_method = AssemblyMethod::All;
-
-    let mut i = 1;
-    while i < args.len() {
-        match args[i].as_str() {
-            "-l" => {
-                i += 1;
-                if i >= args.len() {
-                    eprintln!("error: -l requires a value");
-                    usage();
-                }
-                l_min = args[i].parse().unwrap_or_else(|_| {
-                    eprintln!("error: invalid value for -l: {}", args[i]);
-                    usage();
-                });
-            }
-            "--assembly-method" => {
-                i += 1;
-                if i >= args.len() {
-                    eprintln!("error: --assembly-method requires a value");
-                    usage();
-                }
-                assembly_method = match args[i].as_str() {
-                    "all" => AssemblyMethod::All,
-                    "pca" => AssemblyMethod::Pca,
-                    _ => {
-                        eprintln!("error: unknown assembly method '{}' (expected: all, pca)", args[i]);
-                        usage();
-                    }
-                };
-            }
-            "-" | "--" => {
-                eprintln!("error: unknown flag: {}", args[i]);
-                usage();
-            }
-            arg if arg.starts_with('-') => {
-                eprintln!("error: unknown flag: {}", arg);
-                usage();
-            }
-            _ => {
-                if fasta_path.is_none() {
-                    fasta_path = Some(&args[i]);
-                } else if gfa_path.is_none() {
-                    gfa_path = Some(&args[i]);
-                } else {
-                    eprintln!("error: unexpected argument: {}", args[i]);
-                    usage();
-                }
-            }
-        }
-        i += 1;
-    }
-
-    let fasta_path = fasta_path.unwrap_or_else(|| {
-        eprintln!("error: no input FASTA file specified");
-        usage();
-    });
-
+    let fasta_path = &cli.input;
     let seqs = parse_fasta(fasta_path).unwrap_or_else(|e| {
-        eprintln!("error reading {}: {}", fasta_path, e);
+        eprintln!("error reading {}: {}", fasta_path.display(), e);
         std::process::exit(1);
     });
 
     if seqs.is_empty() {
-        eprintln!("error: no sequences found in {}", fasta_path);
+        eprintln!("error: no sequences found in {}", fasta_path.display());
         std::process::exit(1);
     }
 
@@ -913,6 +901,9 @@ fn main() {
         );
         std::process::exit(1);
     }
+
+    let l_min = cli.min_overlap;
+    let assembly_method = cli.method;
 
     eprintln!(
         "loaded {} sequences (lengths {}-{}) with l_min={}, assembly_method={}",
@@ -930,57 +921,54 @@ fn main() {
     let edges = build_overlap_graph::<LIMBS>(&seq_refs, l_min, assembly_method);
     eprintln!("found {} edges", edges.len());
 
-    match gfa_path {
-        Some(path) => {
-            let gfa_file = File::create(path).unwrap_or_else(|e| {
-                eprintln!("error creating {}: {}", path, e);
-                std::process::exit(1);
-            });
-            if let Err(e) = write_gfa(&seq_refs, &edges, BufWriter::new(gfa_file), assembly_method)
-            {
-                eprintln!("error writing GFA: {}", e);
-                std::process::exit(1);
-            }
+    let prefix = &cli.output;
 
-            let fasta_path = Path::new(path).with_extension("fasta");
-            let fasta_file = File::create(&fasta_path).unwrap_or_else(|e| {
-                eprintln!("error creating {}: {}", fasta_path.display(), e);
-                std::process::exit(1);
-            });
-            if let Err(e) = write_fasta(&seq_refs, &edges, BufWriter::new(fasta_file)) {
-                eprintln!("error writing FASTA: {}", e);
-                std::process::exit(1);
-            }
-            eprintln!("wrote {}", fasta_path.display());
+    let mut stem = prefix.as_os_str().to_os_string();
+    stem.push(".gfa");
+    let gfa_path = PathBuf::from(stem);
+    let gfa_file = File::create(&gfa_path).unwrap_or_else(|e| {
+        eprintln!("error creating {}: {}", gfa_path.display(), e);
+        std::process::exit(1);
+    });
+    if let Err(e) = write_gfa(&seq_refs, &edges, BufWriter::new(gfa_file), assembly_method) {
+        eprintln!("error writing GFA: {}", e);
+        std::process::exit(1);
+    }
+    eprintln!("wrote {}", gfa_path.display());
 
-            let contigs = assemble_contigs(&seq_refs, &edges);
-            if !contigs.is_empty() {
-                let contigs_path = Path::new(path).with_extension("contigs.fasta");
-                let contigs_file = File::create(&contigs_path).unwrap_or_else(|e| {
-                    eprintln!("error creating {}: {}", contigs_path.display(), e);
-                    std::process::exit(1);
-                });
-                if let Err(e) = write_contigs_fasta(&contigs, BufWriter::new(contigs_file)) {
-                    eprintln!("error writing contigs: {}", e);
-                    std::process::exit(1);
-                }
-                eprintln!(
-                    "wrote {} ({} contigs)",
-                    contigs_path.display(),
-                    contigs.len()
-                );
-            } else {
-                eprintln!("no contigs assembled (no connected components with edges)");
-            }
+    let mut fasta_stem = prefix.as_os_str().to_os_string();
+    fasta_stem.push(".fasta");
+    let fasta_out_path = PathBuf::from(fasta_stem);
+    let fasta_file = File::create(&fasta_out_path).unwrap_or_else(|e| {
+        eprintln!("error creating {}: {}", fasta_out_path.display(), e);
+        std::process::exit(1);
+    });
+    if let Err(e) = write_fasta(&seq_refs, &edges, BufWriter::new(fasta_file)) {
+        eprintln!("error writing FASTA: {}", e);
+        std::process::exit(1);
+    }
+    eprintln!("wrote {}", fasta_out_path.display());
+
+    let contigs = assemble_contigs(&seq_refs, &edges);
+    if !contigs.is_empty() {
+        let mut contigs_stem = prefix.as_os_str().to_os_string();
+        contigs_stem.push(".contigs.fasta");
+        let contigs_path = PathBuf::from(contigs_stem);
+        let contigs_file = File::create(&contigs_path).unwrap_or_else(|e| {
+            eprintln!("error creating {}: {}", contigs_path.display(), e);
+            std::process::exit(1);
+        });
+        if let Err(e) = write_contigs_fasta(&contigs, BufWriter::new(contigs_file)) {
+            eprintln!("error writing contigs: {}", e);
+            std::process::exit(1);
         }
-        None => {
-            if let Err(e) =
-                write_gfa(&seq_refs, &edges, BufWriter::new(std::io::stdout()), assembly_method)
-            {
-                eprintln!("error writing GFA: {}", e);
-                std::process::exit(1);
-            }
-        }
+        eprintln!(
+            "wrote {} ({} contigs)",
+            contigs_path.display(),
+            contigs.len()
+        );
+    } else {
+        eprintln!("no contigs assembled (no connected components with edges)");
     }
 }
 
@@ -1029,22 +1017,22 @@ mod tests {
     }
 
     #[test]
-    fn revcomp_u64_palindrome() {
-        let acgt = 0b11_10_01_00u64;
-        assert_eq!(revcomp_u64(acgt, 4), acgt);
+    fn revcomp_seed_palindrome() {
+        let acgt = 0b11_10_01_00u128;
+        assert_eq!(revcomp_seed(acgt, 4), acgt);
     }
 
     #[test]
-    fn revcomp_u64_non_palindrome() {
-        let aaac = 0b01_00_00_00u64;
-        let gttt = 0b11_11_11_10u64;
-        assert_eq!(revcomp_u64(aaac, 4), gttt);
+    fn revcomp_seed_non_palindrome() {
+        let aaac = 0b01_00_00_00u128;
+        let gttt = 0b11_11_11_10u128;
+        assert_eq!(revcomp_seed(aaac, 4), gttt);
     }
 
     #[test]
-    fn revcomp_u64_roundtrip() {
-        let seq = 0b10_01_11_00u64;
-        assert_eq!(revcomp_u64(revcomp_u64(seq, 4), 4), seq);
+    fn revcomp_seed_short_roundtrip() {
+        let seq = 0b10_01_11_00u128;
+        assert_eq!(revcomp_seed(revcomp_seed(seq, 4), 4), seq);
     }
 
     #[test]
@@ -1453,5 +1441,67 @@ mod tests {
         if !contigs.is_empty() {
             assert_eq!(contigs[0].path.len(), 1, "self-edge should not produce multi-node contig");
         }
+    }
+
+    #[test]
+    fn revcomp_seed_cross_limb() {
+        // 34 A's (all zeros) -> 34 T's (all 0b11), needs 68 bits > u64
+        let all_a: u128 = 0;
+        let all_t: u128 = (1u128 << 68) - 1;
+        assert_eq!(revcomp_seed(all_a, 34), all_t);
+    }
+
+    #[test]
+    fn revcomp_seed_roundtrip_36() {
+        // Non-palindromic 36-base key crossing u64 boundary
+        let bases: [u128; 5] = [0, 0, 1, 2, 3]; // AACGT pattern
+        let mut key: u128 = 0;
+        for i in 0..36u32 {
+            key |= bases[i as usize % 5] << (2 * i);
+        }
+        assert_eq!(revcomp_seed(revcomp_seed(key, 36), 36), key);
+    }
+
+    #[test]
+    fn packed_seed_single_limb() {
+        let seq = b"ACGTACGTACGTACGT"; // 16 bases, fits in one limb
+        let p = Packed::<2>::from_bytes(seq).unwrap();
+        let mask: u128 = (1u128 << 32) - 1; // 16 * 2 = 32 bits
+        let seed = p.seed(mask);
+        assert_eq!(seed, p.limbs[0] as u128 & mask);
+    }
+
+    #[test]
+    fn packed_seed_cross_limb() {
+        // 40 bases: 32 in limb[0], 8 in limb[1]
+        let seq = b"ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT";
+        let p = Packed::<2>::from_bytes(seq).unwrap();
+        let mask: u128 = (1u128 << 80) - 1; // 40 * 2 = 80 bits
+        let seed = p.seed(mask);
+        // Position 0: A=0
+        assert_eq!(seed & 0b11, 0);
+        // Position 1: C=1
+        assert_eq!((seed >> 2) & 0b11, 1);
+        // Position 32: A=0 (crosses into limb[1], bit offset 64)
+        assert_eq!((seed >> 64) & 0b11, 0);
+        // Position 33: C=1 (bit offset 66)
+        assert_eq!((seed >> 66) & 0b11, 1);
+    }
+
+    #[test]
+    fn cross_limb_overlap_l_min_35() {
+        // 50bp sequences with 40bp overlap, l_min=35 requires u128 seeds (70 bits)
+        let s0: &[u8] = b"TTTTTTTTTTACGTCGATCGATCGATCGATCGATCGATCGATCGATCGAT";
+        let s1: &[u8] = b"ACGTCGATCGATCGATCGATCGATCGATCGATCGATCGATGGGGGGGGGG";
+        let edges = build_overlap_graph::<2>(&[s0, s1], 35, AssemblyMethod::All);
+        assert!(
+            edges.iter().any(|e| e.from_id == 0
+                && e.to_id == 1
+                && e.from_strand == Strand::Fwd
+                && e.to_strand == Strand::Fwd
+                && e.overlap_len == 40),
+            "expected Fwd->Fwd edge with overlap 40 at l_min=35, got: {:?}",
+            edges
+        );
     }
 }
