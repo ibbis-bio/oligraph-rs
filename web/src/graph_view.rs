@@ -80,7 +80,7 @@ enum DragState {
 }
 
 #[component]
-pub fn GraphView(graph: GraphData) -> impl IntoView {
+pub fn GraphView(graph: GraphData, highlight_comp: ReadSignal<Option<usize>>) -> impl IntoView {
     let n = graph.n_nodes;
     let n_components = graph.n_components;
     let positions = RwSignal::new(graph.initial_positions.clone());
@@ -222,66 +222,77 @@ pub fn GraphView(graph: GraphData) -> impl IntoView {
     let edge_lines = move || {
         let p = positions.get();
         let hide = hide_isolated.get();
+        let highlighted = highlight_comp.get();
         edges.with_value(|edges_vec| {
             connected.with_value(|conn| {
-                edges_vec
-                    .iter()
-                    .filter_map(|e| {
-                        let from = e.from as usize;
-                        let to = e.to as usize;
-                        if hide && !conn.get(from).copied().unwrap_or(false) {
-                            return None;
-                        }
-                        let (x1, y1) = p.get(from).copied().unwrap_or((0.0, 0.0));
-                        let (x2, y2) = p.get(to).copied().unwrap_or((0.0, 0.0));
-                        let color = e.kind.color();
-                        let sw = (e.overlap as f32 / 8.0).clamp(0.6, 3.5);
-                        let title_text = format!(
-                            "{} → {}  ({}, overlap {} bp)",
-                            from,
-                            to,
-                            e.kind.label(),
-                            e.overlap
-                        );
-                        Some(if from == to {
-                            let r = 8.0;
-                            let path = format!(
-                                "M {} {} a {r} {r} 0 1 1 {} {}",
-                                x1 + r,
-                                y1,
-                                -2.0 * r,
-                                0.001
+                components.with_value(|comps| {
+                    edges_vec
+                        .iter()
+                        .filter_map(|e| {
+                            let from = e.from as usize;
+                            let to = e.to as usize;
+                            if hide && !conn.get(from).copied().unwrap_or(false) {
+                                return None;
+                            }
+                            let (x1, y1) = p.get(from).copied().unwrap_or((0.0, 0.0));
+                            let (x2, y2) = p.get(to).copied().unwrap_or((0.0, 0.0));
+                            let color = e.kind.color();
+                            let sw = (e.overlap as f32 / 8.0).clamp(0.6, 3.5);
+                            
+                            let comp_from = comps[from];
+                            let is_highlighted = highlighted.is_some() && highlighted == comp_from;
+                            let opacity = if highlighted.is_none() || is_highlighted { "0.85" } else { "0.1" };
+                            let stroke_width = if is_highlighted { sw * 1.5 } else { sw };
+
+                            let title_text = format!(
+                                "{} → {}  ({}, overlap {} bp)",
+                                from,
+                                to,
+                                e.kind.label(),
+                                e.overlap
                             );
-                            view! {
-                                <path
-                                    d=path
-                                    fill="none"
-                                    stroke=color
-                                    stroke-width=sw
-                                    opacity="0.85"
-                                >
-                                    <title>{title_text}</title>
-                                </path>
-                            }
-                            .into_any()
-                        } else {
-                            view! {
-                                <line
-                                    x1=x1
-                                    y1=y1
-                                    x2=x2
-                                    y2=y2
-                                    stroke=color
-                                    stroke-width=sw
-                                    opacity="0.75"
-                                >
-                                    <title>{title_text}</title>
-                                </line>
-                            }
-                            .into_any()
+                            Some(if from == to {
+                                let r = 8.0;
+                                let path = format!(
+                                    "M {} {} a {r} {r} 0 1 1 {} {}",
+                                    x1 + r,
+                                    y1,
+                                    -2.0 * r,
+                                    0.001
+                                );
+                                view! {
+                                    <path
+                                        d=path
+                                        fill="none"
+                                        stroke=color
+                                        stroke-width=stroke_width
+                                        opacity=opacity
+                                        style="transition: opacity 0.2s, stroke-width 0.2s;"
+                                    >
+                                        <title>{title_text}</title>
+                                    </path>
+                                }
+                                .into_any()
+                            } else {
+                                view! {
+                                    <line
+                                        x1=x1
+                                        y1=y1
+                                        x2=x2
+                                        y2=y2
+                                        stroke=color
+                                        stroke-width=stroke_width
+                                        opacity=opacity
+                                        style="transition: opacity 0.2s, stroke-width 0.2s;"
+                                    >
+                                        <title>{title_text}</title>
+                                    </line>
+                                }
+                                .into_any()
+                            })
                         })
-                    })
-                    .collect::<Vec<_>>()
+                        .collect::<Vec<_>>()
+                })
             })
         })
     };
@@ -289,6 +300,7 @@ pub fn GraphView(graph: GraphData) -> impl IntoView {
     let node_circles = move || {
         let p = positions.get();
         let hide = hide_isolated.get();
+        let highlighted = highlight_comp.get();
         connected.with_value(|conn| {
             components.with_value(|comps| {
             seq_lengths.with_value(|lens| {
@@ -300,6 +312,12 @@ pub fn GraphView(graph: GraphData) -> impl IntoView {
                         let (x, y) = p.get(i).copied().unwrap_or((0.0, 0.0));
                         let color = component_color(comps[i]);
                         let length = lens[i];
+                        
+                        let comp = comps[i];
+                        let is_highlighted = highlighted.is_some() && highlighted == comp;
+                        let opacity = if highlighted.is_none() || is_highlighted { "1.0" } else { "0.15" };
+                        let radius = if is_highlighted { "10" } else { "7" };
+
                         let title_text = format!("oligo {} ({} bp)", i, length);
                         let on_node_down = move |ev: web_sys::PointerEvent| {
                             ev.stop_propagation();
@@ -320,11 +338,12 @@ pub fn GraphView(graph: GraphData) -> impl IntoView {
                             <circle
                                 cx=x
                                 cy=y
-                                r="7"
+                                r=radius
                                 fill=color
                                 stroke="#1e2330"
                                 stroke-width="1.2"
-                                style="cursor:grab;"
+                                opacity=opacity
+                                style="cursor:grab; transition: opacity 0.2s, r 0.2s;"
                                 on:pointerdown=on_node_down
                             >
                                 <title>{title_text}</title>
@@ -338,13 +357,21 @@ pub fn GraphView(graph: GraphData) -> impl IntoView {
     };
 
     view! {
-        <section class="panel">
-            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.5rem;">
-                <h2 style="margin:0; font-size:1.1rem;">"Overlap graph"</h2>
-                <div style="display:flex; gap:0.5rem;">
+        <section class="panel" style="padding: 1.25rem;">
+            <div style="display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:1.25rem;">
+                <div>
+                    <h2 style="margin-bottom: 0.25rem; display: flex; align-items: center; gap: 0.5rem;">
+                        <span style="width: 8px; height: 8px; border-radius: 2px; background: var(--warn);"></span>
+                        "Overlap Graph"
+                    </h2>
+                    <div style="font-size:0.8rem; color:var(--muted); font-family: var(--font-mono);">
+                        {format!("{} nodes • {} edges • {} components", n, edges.with_value(|e| e.len()), n_components)}
+                    </div>
+                </div>
+                <div style="display:flex; gap:0.6rem;">
                     <button
+                        class="btn-secondary"
                         on:click=move |_| hide_isolated.update(|v| *v = !*v)
-                        style="font-size:0.85rem; padding:0.3rem 0.7rem;"
                     >
                         {move || if hide_isolated.get() {
                             format!("Show isolated ({})", n_isolated)
@@ -352,28 +379,39 @@ pub fn GraphView(graph: GraphData) -> impl IntoView {
                             format!("Hide isolated ({})", n_isolated)
                         }}
                     </button>
-                    <button on:click=view_all style="font-size:0.85rem; padding:0.3rem 0.7rem;">"View all"</button>
-                    <button on:click=reset_view style="font-size:0.85rem; padding:0.3rem 0.7rem;">"Reset layout"</button>
+                    <button class="btn-secondary" on:click=view_all>"View all"</button>
+                    <button class="btn-secondary" on:click=reset_view>"Reset view"</button>
                 </div>
             </div>
-            <div style="font-size:0.8rem; color:var(--muted); margin-bottom:0.5rem;">
-                "Drag nodes · drag background to pan · scroll to zoom · "
-                {format!("{} nodes, {} edges, {} component(s)", n, edges.with_value(|e| e.len()), n_components)}
+
+            <div class="graph-container">
+                <svg
+                    node_ref=svg_ref
+                    viewBox=viewbox_attr
+                    preserveAspectRatio="xMidYMid meet"
+                    on:pointerdown=on_bg_down
+                    on:pointermove=on_move
+                    on:pointerup=on_up
+                    on:pointerleave=on_up
+                    on:wheel=on_wheel
+                    style="display:block; width:100%; height:600px; cursor:grab; touch-action:none;"
+                >
+                    <defs>
+                        <pattern id="grid" width="100" height="100" patternUnits="userSpaceOnUse">
+                            <path d="M 100 0 L 0 0 0 100" fill="none" stroke="rgba(255,255,255,0.03)" stroke-width="1"/>
+                        </pattern>
+                    </defs>
+                    <rect width="100000" height="100000" x="-50000" y="-50000" fill="url(#grid)" />
+                    
+                    <g>{edge_lines}</g>
+                    <g>{node_circles}</g>
+                </svg>
+                
+                <div style="position: absolute; bottom: 1rem; left: 1rem; pointer-events: none; background: rgba(0,0,0,0.4); backdrop-filter: blur(4px); padding: 0.5rem 0.75rem; border-radius: 6px; border: 1px solid rgba(255,255,255,0.05); font-size: 0.75rem; color: var(--muted);">
+                    "DRAG TO PAN • SCROLL TO ZOOM • DRAG NODES"
+                </div>
             </div>
-            <svg
-                node_ref=svg_ref
-                viewBox=viewbox_attr
-                preserveAspectRatio="xMidYMid meet"
-                on:pointerdown=on_bg_down
-                on:pointermove=on_move
-                on:pointerup=on_up
-                on:pointerleave=on_up
-                on:wheel=on_wheel
-                style="display:block; width:100%; height:600px; background:#0a0c10; border-radius:6px; cursor:grab; touch-action:none;"
-            >
-                <g>{edge_lines}</g>
-                <g>{node_circles}</g>
-            </svg>
+
             <Legend />
         </section>
     }
@@ -382,13 +420,19 @@ pub fn GraphView(graph: GraphData) -> impl IntoView {
 #[component]
 fn Legend() -> impl IntoView {
     view! {
-        <div style="display:flex; flex-wrap:wrap; gap:1rem; margin-top:0.6rem; font-size:0.8rem;">
-            <span style="color:var(--muted);">"Edges:"</span>
-            <LegendSwatch color=EdgeKind::FwdFwd.color() label=EdgeKind::FwdFwd.label() />
-            <LegendSwatch color=EdgeKind::FwdRev.color() label=EdgeKind::FwdRev.label() />
-            <LegendSwatch color=EdgeKind::RevFwd.color() label=EdgeKind::RevFwd.label() />
-            <LegendSwatch color=EdgeKind::RevRev.color() label=EdgeKind::RevRev.label() />
-            <span style="color:var(--muted); margin-left:1rem;">"Nodes colored by connected component"</span>
+        <div style="display:flex; flex-wrap:wrap; align-items: center; gap:1.25rem; margin-top:1.25rem; padding: 0.75rem 1rem; background: rgba(0,0,0,0.15); border-radius: 6px; font-size: 0.75rem;">
+            <div style="display: flex; align-items: center; gap: 0.75rem;">
+                <span style="color:var(--muted); text-transform: uppercase; letter-spacing: 0.05em; font-weight: 600;">"Edges"</span>
+                <LegendSwatch color=EdgeKind::FwdFwd.color() label=EdgeKind::FwdFwd.label() />
+                <LegendSwatch color=EdgeKind::FwdRev.color() label=EdgeKind::FwdRev.label() />
+                <LegendSwatch color=EdgeKind::RevFwd.color() label=EdgeKind::RevFwd.label() />
+                <LegendSwatch color=EdgeKind::RevRev.color() label=EdgeKind::RevRev.label() />
+            </div>
+            <div style="height: 12px; width: 1px; background: var(--border);"></div>
+            <div style="display: flex; align-items: center; gap: 0.5rem;">
+                <span style="color:var(--muted); text-transform: uppercase; letter-spacing: 0.05em; font-weight: 600;">"Nodes"</span>
+                <span style="color: var(--text);">"Colored by connected component"</span>
+            </div>
         </div>
     }
 }
@@ -396,9 +440,10 @@ fn Legend() -> impl IntoView {
 #[component]
 fn LegendSwatch(color: &'static str, label: &'static str) -> impl IntoView {
     view! {
-        <span style="display:inline-flex; align-items:center; gap:0.35rem;">
-            <span style=move || format!("display:inline-block; width:14px; height:3px; background:{};", color)></span>
-            <span>{label}</span>
+        <span style="display:inline-flex; align-items:center; gap:0.4rem; background: rgba(255,255,255,0.03); padding: 0.2rem 0.5rem; border-radius: 4px; border: 1px solid rgba(255,255,255,0.03);">
+            <span style=move || format!("display:inline-block; width:10px; height:10px; border-radius: 2px; background:{};", color)></span>
+            <span style="color: var(--text); font-family: var(--font-mono); font-size: 0.7rem;">{label}</span>
         </span>
     }
 }
+
