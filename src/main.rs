@@ -550,7 +550,7 @@ fn pick_start(
     if let Some((id, strand, _)) = best_tip {
         return (id, strand);
     }
-    let mut best: (u32, Strand, u32) = (comp[0], Strand::Fwd, 0);
+    let mut best: Option<(u32, Strand, u32)> = None;
     for &id in comp {
         if visited[id as usize] {
             continue;
@@ -561,13 +561,22 @@ fn pick_start(
                 if visited[nid as usize] {
                     continue;
                 }
-                if ov > best.2 || (ov == best.2 && id < best.0) {
-                    best = (id, strand, ov);
+                if best.is_none() || ov > best.unwrap().2 || (ov == best.unwrap().2 && id < best.unwrap().0) {
+                    best = Some((id, strand, ov));
                 }
             }
         }
     }
-    (best.0, best.1)
+    if let Some((id, strand, _)) = best {
+        return (id, strand);
+    }
+    // All unvisited nodes have only visited neighbors — pick first unvisited
+    for &id in comp {
+        if !visited[id as usize] {
+            return (id, Strand::Fwd);
+        }
+    }
+    unreachable!("pick_start called with all nodes visited")
 }
 
 fn greedy_bidirectional_walk(
