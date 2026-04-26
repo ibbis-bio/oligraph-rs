@@ -144,10 +144,7 @@ const HELP_TEMPLATE: &str = "\
 
 {usage-heading} {usage}
 
-Required:
-{positionals}
-Options:
-{options}";
+{all-args}";
 
 #[derive(Parser)]
 #[command(
@@ -155,14 +152,17 @@ Options:
     version,
     about = "Overlap graph builder and contig assembler for oligonucleotide pools",
     help_template = HELP_TEMPLATE,
+    next_help_heading = "Options",
+    disable_help_flag = true,
+    disable_version_flag = true,
 )]
 struct Cli {
     /// Input FASTA file
-    #[arg(short, long)]
+    #[arg(short, long, help_heading = "Required")]
     input: PathBuf,
 
     /// Output file prefix (writes .gfa, .fasta, .contigs.fasta)
-    #[arg(short, long)]
+    #[arg(short, long, help_heading = "Required")]
     output: PathBuf,
 
     /// Minimum overlap length in bp
@@ -176,6 +176,14 @@ struct Cli {
     /// Number of threads
     #[arg(short, long, default_value_t = 1)]
     threads: usize,
+
+    /// Print help
+    #[arg(short, long, action = clap::ArgAction::Help)]
+    help: Option<bool>,
+
+    /// Print version
+    #[arg(short = 'V', long, action = clap::ArgAction::Version)]
+    version: Option<bool>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
