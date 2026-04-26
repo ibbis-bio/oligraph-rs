@@ -1,12 +1,8 @@
-// Cargo.toml:
-//   rustc-hash = "2"
-//   rayon = "1"          # optional, for parallel seed-extend
-
-use std::env;
 use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
+use clap::Parser;
 use indicatif::{ProgressBar, ProgressStyle};
 use rustc_hash::FxHashMap;
 
@@ -136,10 +132,50 @@ pub struct Edge {
     pub overlap_len: u32,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum AssemblyMethod {
     All,
     Pca,
+}
+
+const HELP_TEMPLATE: &str = "\
+{name} {version}
+{about}
+
+{usage-heading} {usage}
+
+Required:
+{positionals}
+Options:
+{options}";
+
+#[derive(Parser)]
+#[command(
+    name = "oligraph",
+    version,
+    about = "Overlap graph builder and contig assembler for oligonucleotide pools",
+    help_template = HELP_TEMPLATE,
+)]
+struct Cli {
+    /// Input FASTA file
+    #[arg(short, long)]
+    input: PathBuf,
+
+    /// Output file prefix (writes .gfa, .fasta, .contigs.fasta)
+    #[arg(short, long)]
+    output: PathBuf,
+
+    /// Minimum overlap length in bp
+    #[arg(short = 'l', long, default_value_t = 15)]
+    min_overlap: u32,
+
+    /// Assembly method
+    #[arg(short, long, value_enum, default_value_t = AssemblyMethod::All)]
+    method: AssemblyMethod,
+
+    /// Number of threads
+    #[arg(short, long, default_value_t = 1)]
+    threads: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -829,7 +865,7 @@ fn usage() -> ! {
 }
 
 fn main() {
-    let args: Vec<String> = env::args().collect();
+    let args: Vec<String> = std::env::args().collect();
     if args.len() < 2 {
         usage();
     }
