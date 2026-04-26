@@ -924,6 +924,15 @@ fn main() {
 
     let prefix = &cli.output;
 
+    if let Some(parent) = Path::new(prefix).parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent).unwrap_or_else(|e| {
+                eprintln!("error creating directory {}: {}", parent.display(), e);
+                std::process::exit(1);
+            });
+        }
+    }
+
     let mut stem = prefix.as_os_str().to_os_string();
     stem.push(".gfa");
     let gfa_path = PathBuf::from(stem);
