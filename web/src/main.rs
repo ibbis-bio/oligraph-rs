@@ -132,11 +132,19 @@ fn analyze_stats(
     } else {
         let edge_views: Vec<EdgeView> = edges
             .iter()
-            .map(|e| EdgeView {
-                from: e.from_id,
-                to: e.to_id,
-                overlap: e.overlap_len,
-                kind: edge_kind_from(e.from_strand, e.to_strand),
+            .filter_map(|e| {
+                let kind = edge_kind_from(e.from_strand, e.to_strand);
+                // PCA mode must never show Fwd→Fwd edges; filter defensively in
+                // case any slip through the backend filter.
+                if method == AssemblyMethod::Pca && kind == EdgeKind::FwdFwd {
+                    return None;
+                }
+                Some(EdgeView {
+                    from: e.from_id,
+                    to: e.to_id,
+                    overlap: e.overlap_len,
+                    kind,
+                })
             })
             .collect();
         let edge_pairs: Vec<(u32, u32)> = edges.iter().map(|e| (e.from_id, e.to_id)).collect();
@@ -191,6 +199,7 @@ fn App() -> impl IntoView {
     let (graph_skip, set_graph_skip) = signal::<Option<String>>(None);
     let (layout_busy, set_layout_busy) = signal(false);
     let (filename, set_filename) = signal::<Option<String>>(None);
+    let (highlight_comp, set_highlight_comp) = signal::<Option<usize>>(None);
 
     let file_input_ref: NodeRef<leptos::html::Input> = NodeRef::new();
 
@@ -349,14 +358,17 @@ fn App() -> impl IntoView {
     };
 
     let on_method_change = move |ev: leptos::ev::Event| {
-        let target: HtmlInputElement = ev.target().unwrap().dyn_into().unwrap();
-        set_method.set(target.value());
+        use wasm_bindgen::JsCast;
+        if let Some(target) = ev.target() {
+            if let Ok(sel) = target.dyn_into::<web_sys::HtmlSelectElement>() {
+                set_method.set(sel.value());
+            }
+        }
     };
 
     view! {
         <main>
-            <h1>"OliGraph"</h1>
-            <p class="lede">"Upload a FASTA of oligos. Get overlap graph stats and assembled contigs."</p>
+            <Logo />
 
             <section class="panel">
                 <div class="row">
@@ -389,43 +401,128 @@ fn App() -> impl IntoView {
                         {move || if busy.get() { "Analyzing…" } else { "Analyze" }}
                     </button>
                 </div>
-                {move || error.get().map(|e| view! { <p class="err">{e}</p> })}
+                {move || error.get().map(|e| view! { <div class="err">{e}</div> })}
                 {move || filename.get().map(|n| view! {
-                    <p style="color:var(--muted); margin: 0.5rem 0 0; font-size: 0.85rem;">
-                        "File: " <code>{n}</code>
-                    </p>
+                    <div style="color:var(--muted); margin-top: 1rem; font-size: 0.8rem; display: flex; align-items: center; gap: 0.5rem;">
+                        <span style="opacity: 0.6;">"ACTIVE FILE:"</span> <code>{n}</code>
+                    </div>
                 })}
             </section>
 
-            {move || analysis.get().map(|a| view! { <Results analysis=a /> })}
+            {move || analysis.get().map(|a| view! { <Results analysis=a set_highlight_comp /> })}
 
             {move || layout_busy.get().then(|| view! {
-                <section class="panel">
-                    <p style="color:var(--muted); margin:0;">"Computing graph layout…"</p>
+                <section class="panel" style="display: flex; align-items: center; justify-content: center; padding: 2rem;">
+                    <LoadingDots label="Computing graph layout" />
                 </section>
             })}
 
-            {move || graph.get().map(|g| view! { <GraphView graph=g /> })}
+            {move || graph.get().map(|g| view! { <GraphView graph=g highlight_comp /> })}
 
             {move || graph_skip.get().map(|r| view! {
-                <section class="panel">
-                    <p style="color:var(--muted); margin:0;">{r}</p>
+                <section class="panel" style="border-left: 4px solid var(--warn);">
+                    <p style="color:var(--muted); margin:0; font-size: 0.9rem;">
+                        <strong>"Notice:"</strong> " " {r}
+                    </p>
                 </section>
             })}
+
+            <footer style="margin-top: auto; padding: 4rem 0 2rem; border-top: 1px solid var(--border); text-align: center;">
+                <div style="display: flex; align-items: center; justify-content: center; gap: 0.5rem; color: var(--muted); font-size: 0.85rem;">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="opacity: 0.8;">
+                        <rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect>
+                        <path d="M7 11V7a5 5 0 0 1 10 0v4"></path>
+                    </svg>
+                    <span>"Privacy First: All sequence analysis and graph layout is performed locally in your browser. "</span>
+                    <strong style="color: var(--text); font-weight: 600;">"No data is sent to any server."</strong>
+                </div>
+            </footer>
         </main>
     }
 }
 
 #[component]
-fn Results(analysis: Analysis) -> impl IntoView {
+fn Logo() -> impl IntoView {
+    view! {
+        <header style="margin-bottom: 3.5rem; display: flex; flex-direction: column; align-items: center; text-align: center;">
+            <div style="display:flex; align-items:center; gap:1.25rem; margin-bottom:1.25rem;">
+                <div class="logo-icon-container" style="position: relative; width: 48px; height: 48px; background: rgba(255,255,255,0.03); border-radius: 12px; display: flex; align-items: center; justify-content: center; border: 1px solid var(--border);">
+                    <svg width="32" height="32" viewBox="0 0 44 44" style="overflow:visible;">
+                        <g class="logo-helix">
+                            <line x1="14" y1="10" x2="30" y2="10" stroke="currentColor" stroke-width="1.2" opacity="0.25"/>
+                            <line x1="14" y1="22" x2="30" y2="22" stroke="currentColor" stroke-width="1.2" opacity="0.25"/>
+                            <line x1="14" y1="34" x2="30" y2="34" stroke="currentColor" stroke-width="1.2" opacity="0.25"/>
+                            
+                            <path d="M 16 4 C 34 4, 34 16, 22 16 S 10 28, 22 28 S 34 40, 16 40" fill="none" stroke="#4ade80" stroke-width="2.8" stroke-linecap="round"/>
+                            <path d="M 28 4 C 10 4, 10 16, 22 16 S 34 28, 22 28 S 10 40, 28 40" fill="none" stroke="#60a5fa" stroke-width="2.8" stroke-linecap="round"/>
+                        </g>
+                        <g class="logo-graph">
+                            <line class="logo-edge" x1="22" y1="5"  x2="5"  y2="22" stroke="currentColor" stroke-width="1.5" opacity="0.15"/>
+                            <line class="logo-edge" x1="39" y1="22" x2="22" y2="39" stroke="currentColor" stroke-width="1.5" opacity="0.15"/>
+                            <line class="logo-edge-flow" x1="22" y1="5"  x2="5"  y2="22" stroke="var(--accent)" stroke-width="1.5" stroke-linecap="round"/>
+                            <line class="logo-edge-flow" x1="39" y1="22" x2="22" y2="39" stroke="var(--accent)" stroke-width="1.5" stroke-linecap="round"/>
+                            
+                            <circle cx="22" cy="5"  r="5.5" fill="#4ade80" stroke="#0b0d11" stroke-width="2"/>
+                            <circle cx="5"  cy="22" r="5.5" fill="#60a5fa" stroke="#0b0d11" stroke-width="2"/>
+                            <circle cx="39" cy="22" r="5.5" fill="#fbbf24" stroke="#0b0d11" stroke-width="2"/>
+                            <circle cx="22" cy="39" r="5.5" fill="#a78bfa" stroke="#0b0d11" stroke-width="2"/>
+                        </g>
+                    </svg>
+                </div>
+                <div>
+                    <h1 class="logo-wordmark">"OliGraph"</h1>
+                    <div style="font-size:0.95rem; color:var(--muted); margin-top:0.15rem; font-weight: 450;">
+                        "Oligonucleotide overlap graph explorer"
+                    </div>
+                </div>
+            </div>
+        </header>
+    }
+}
+
+#[component]
+fn LoadingDots(label: &'static str) -> impl IntoView {
+    view! {
+        <div style="display: flex; align-items: center; gap: 0.75rem; color: var(--text); font-weight: 500;">
+            {label}
+            <div style="display: flex; gap: 0.25rem;">
+                <span class="dot">"●"</span>
+                <span class="dot" style="animation-delay: 0.2s">"●"</span>
+                <span class="dot" style="animation-delay: 0.4s">"●"</span>
+            </div>
+        </div>
+    }
+}
+
+#[component]
+fn Results(analysis: Analysis, set_highlight_comp: WriteSignal<Option<usize>>) -> impl IntoView {
     let stat_grid = view! {
         <div class="stats">
-            <div class="stat"><div class="k">"input sequences"</div><div class="v">{analysis.input_count}</div></div>
-            <div class="stat"><div class="k">"skipped (non-ACGT)"</div><div class="v">{analysis.skipped}</div></div>
-            <div class="stat"><div class="k">"length range"</div><div class="v">{format!("{}–{} bp", analysis.len_min, analysis.len_max)}</div></div>
-            <div class="stat"><div class="k">"overlap edges"</div><div class="v">{analysis.edge_count}</div></div>
-            <div class="stat"><div class="k">"isolated oligos"</div><div class="v">{analysis.isolated_count}</div></div>
-            <div class="stat"><div class="k">"contigs"</div><div class="v">{analysis.contigs.len()}</div></div>
+            <div class="stat">
+                <div class="k">"sequences"</div>
+                <div class="v">{analysis.input_count}</div>
+            </div>
+            <div class="stat">
+                <div class="k">"skipped"</div>
+                <div class="v" style={move || if analysis.skipped > 0 { "color: var(--warn)" } else { "" }}>
+                    {analysis.skipped}
+                </div>
+            </div>
+            <div class="stat">
+                <div class="k">"length range"</div>
+                <div class="v" style="font-size: 1.1rem;">
+                    {format!("{}–{} ", analysis.len_min, analysis.len_max)}
+                    <span style="font-size: 0.8rem; font-weight: 500; opacity: 0.6;">"BP"</span>
+                </div>
+            </div>
+            <div class="stat">
+                <div class="k">"edges"</div>
+                <div class="v">{analysis.edge_count}</div>
+            </div>
+            <div class="stat">
+                <div class="k">"contigs"</div>
+                <div class="v" style="color: var(--pass)">{analysis.contigs.len()}</div>
+            </div>
         </div>
     };
 
@@ -442,20 +539,28 @@ fn Results(analysis: Analysis) -> impl IntoView {
                 js_sys::encode_uri_component(&c.fasta)
             );
             let dl_name = format!("contig_{}.fasta", c.index);
+            let comp = c.component;
             view! {
-                <tr>
-                    <td class="num">{format!("contig_{}", c.index)}</td>
+                <tr
+                    on:mouseenter=move |_| set_highlight_comp.set(Some(comp))
+                    on:mouseleave=move |_| set_highlight_comp.set(None)
+                    style="cursor: default;"
+                >
+                    <td class="num" style="color: var(--accent); font-weight: 600;">{format!("c_{}", c.index)}</td>
                     <td class="num">{c.component}</td>
                     <td class="num">{c.oligos}</td>
                     <td class="num">{c.length}</td>
-                    <td>{topo}</td>
+                    <td style="text-transform: capitalize;">{topo}</td>
                     <td class="num">{c.branches}</td>
                     <td>
                         <a
                             href=href
                             download=dl_name
-                            style="color:var(--accent); font-size:0.85rem;"
-                        >"FASTA"</a>
+                            style="color:var(--accent); font-size:0.8rem; font-weight: 600; text-decoration: none; display: flex; align-items: center; gap: 0.25rem;"
+                        >
+                            <span>"↓"</span>
+                            <span>"FASTA"</span>
+                        </a>
                     </td>
                 </tr>
             }
@@ -463,35 +568,49 @@ fn Results(analysis: Analysis) -> impl IntoView {
         .collect();
 
     view! {
-        <section class="panel">
-            <h2 style="margin-top:0; font-size:1.1rem;">"Summary"</h2>
-            {stat_grid}
-        </section>
-        <section class="panel">
-            <h2 style="margin-top:0; font-size:1.1rem;">"Contigs"</h2>
-            {if analysis.contigs.is_empty() {
-                view! { <p style="color:var(--muted); margin:0;">"No contigs assembled."</p> }.into_any()
-            } else {
-                view! {
-                    <table>
-                        <thead>
-                            <tr>
-                                <th>"id"</th>
-                                <th>"component"</th>
-                                <th>"oligos"</th>
-                                <th>"length (bp)"</th>
-                                <th>"topology"</th>
-                                <th>"branches"</th>
-                                <th>"download"</th>
-                            </tr>
-                        </thead>
-                        <tbody>{rows}</tbody>
-                    </table>
-                }.into_any()
-            }}
-        </section>
+        <div style="display: grid; grid-template-columns: 1fr; gap: 1.5rem; margin-bottom: 1.5rem;">
+            <section class="panel">
+                <h2 style="margin-bottom: 1.25rem; display: flex; align-items: center; gap: 0.5rem;">
+                    <span style="width: 8px; height: 8px; border-radius: 2px; background: var(--accent);"></span>
+                    "Analysis Summary"
+                </h2>
+                {stat_grid}
+            </section>
+            
+            <section class="panel" style="padding: 0; overflow: hidden;">
+                <div style="padding: 1.25rem 1.5rem; border-bottom: 1px solid var(--border);">
+                    <h2 style="display: flex; align-items: center; gap: 0.5rem;">
+                        <span style="width: 8px; height: 8px; border-radius: 2px; background: var(--pass);"></span>
+                        "Assembled Contigs"
+                    </h2>
+                </div>
+                <div style="overflow-x: auto;">
+                    {if analysis.contigs.is_empty() {
+                        view! { <p style="color:var(--muted); padding: 2rem; margin:0; text-align: center;">"No contigs assembled."</p> }.into_any()
+                    } else {
+                        view! {
+                            <table>
+                                <thead>
+                                    <tr>
+                                        <th>"ID"</th>
+                                        <th>"Comp"</th>
+                                        <th>"Oligos"</th>
+                                        <th>"Len (bp)"</th>
+                                        <th>"Topology"</th>
+                                        <th>"Br."</th>
+                                        <th>"Download"</th>
+                                    </tr>
+                                </thead>
+                                <tbody>{rows}</tbody>
+                            </table>
+                        }.into_any()
+                    }}
+                </div>
+            </section>
+        </div>
     }
 }
+
 
 fn main() {
     console_error_panic_hook::set_once();
