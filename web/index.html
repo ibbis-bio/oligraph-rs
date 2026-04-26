@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>OliGraph</title>
+    <link data-trunk rel="rust" data-wasm-opt="0" />
+    <style>
+      :root {
+        --bg: #0f1115;
+        --panel: #181b22;
+        --border: #2a2f3a;
+        --text: #e7e9ee;
+        --muted: #8b93a7;
+        --accent: #6aa9ff;
+        --pass: #4ade80;
+        --warn: #fbbf24;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+        background: var(--bg);
+        color: var(--text);
+        line-height: 1.5;
+      }
+      main { max-width: 960px; margin: 0 auto; padding: 2rem 1rem; }
+      h1 { margin: 0 0 0.25rem; font-size: 1.5rem; }
+      p.lede { color: var(--muted); margin: 0 0 1.5rem; }
+      .panel {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 1rem 1.25rem;
+        margin-bottom: 1rem;
+      }
+      .row { display: flex; gap: 1rem; flex-wrap: wrap; align-items: end; }
+      .field { display: flex; flex-direction: column; gap: 0.25rem; }
+      .field label { font-size: 0.85rem; color: var(--muted); }
+      input[type="number"], select, input[type="file"] {
+        background: #0c0e13;
+        color: var(--text);
+        border: 1px solid var(--border);
+        border-radius: 4px;
+        padding: 0.4rem 0.6rem;
+        font-size: 0.95rem;
+      }
+      button {
+        background: var(--accent);
+        color: #0a0c10;
+        border: none;
+        border-radius: 4px;
+        padding: 0.5rem 1rem;
+        font-weight: 600;
+        cursor: pointer;
+      }
+      button:disabled { opacity: 0.5; cursor: not-allowed; }
+      table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
+      th, td { text-align: left; padding: 0.4rem 0.6rem; border-bottom: 1px solid var(--border); }
+      th { color: var(--muted); font-weight: 500; }
+      td.num { font-variant-numeric: tabular-nums; }
+      .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 0.75rem; }
+      .stat .k { color: var(--muted); font-size: 0.8rem; }
+      .stat .v { font-size: 1.25rem; font-variant-numeric: tabular-nums; }
+      .err { color: #ff8080; }
+      code { background: #0c0e13; padding: 1px 4px; border-radius: 3px; }
+    </style>
+  </head>
+  <body></body>
+</html>

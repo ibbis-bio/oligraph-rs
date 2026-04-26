@@ -1,0 +1,14 @@
+[package]
+name = "oligraph-web"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+leptos = { version = "0.7", features = ["csr"] }
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+web-sys = { version = "0.3", features = ["File", "FileList", "HtmlInputElement", "Event", "PointerEvent", "WheelEvent", "MouseEvent", "DomRect", "Element", "SvgsvgElement", "SvgGraphicsElement"] }
+gloo-file = { version = "0.3", features = ["futures"] }
+console_error_panic_hook = "0.1"
+
+oligraph-rs = { path = "../oligraph-rs", default-features = false }
