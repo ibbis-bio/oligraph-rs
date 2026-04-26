@@ -216,7 +216,7 @@ fn App() -> impl IntoView {
     let on_l_min_change = move |ev: leptos::ev::Event| {
         let target: HtmlInputElement = ev.target().unwrap().dyn_into().unwrap();
         if let Ok(v) = target.value().parse::<u32>() {
-            set_l_min.set(v.clamp(1, 32));
+            set_l_min.set(v.clamp(1, 64));
         }
     };
 
@@ -245,7 +245,7 @@ fn App() -> impl IntoView {
                         <input
                             type="number"
                             min="1"
-                            max="32"
+                            max="64"
                             prop:value=move || l_min.get().to_string()
                             on:change=on_l_min_change
                         />

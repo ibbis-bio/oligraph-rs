@@ -17,3 +17,4 @@ progress = ["dep:indicatif"]
 [dependencies]
 rustc-hash = "2"
 indicatif = { version = "0.17", optional = true }
+clap = { version = "4", features = ["derive"] }

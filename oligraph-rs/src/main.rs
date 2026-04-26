@@ -1,15 +1,53 @@
-use std::env;
-use std::fs;
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::BufWriter;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
+use clap::Parser;
 use oligraph_rs::{
-    AssemblyMethod, LIMBS, assemble_contigs, build_overlap_graph, parse_fasta_str, write_contigs_fasta,
-    write_fasta, write_gfa,
+    AssemblyMethod, LIMBS, assemble_contigs, build_overlap_graph, parse_fasta_str,
+    write_contigs_fasta, write_fasta, write_gfa,
 };
 
-fn parse_fasta(path: &str) -> std::io::Result<Vec<Vec<u8>>> {
+#[derive(clap::ValueEnum, Clone, Copy)]
+enum CliMethod {
+    All,
+    Pca,
+}
+
+impl From<CliMethod> for AssemblyMethod {
+    fn from(m: CliMethod) -> Self {
+        match m {
+            CliMethod::All => AssemblyMethod::All,
+            CliMethod::Pca => AssemblyMethod::Pca,
+        }
+    }
+}
+
+#[derive(Parser)]
+#[command(
+    name = "oligraph",
+    version,
+    about = "Overlap graph builder and contig assembler for oligonucleotide pools",
+)]
+struct Cli {
+    /// Input FASTA file
+    #[arg(short, long)]
+    input: PathBuf,
+
+    /// Output file prefix (writes .gfa, .fasta, .contigs.fasta)
+    #[arg(short, long)]
+    output: PathBuf,
+
+    /// Minimum overlap length in bp [1-64]
+    #[arg(short = 'l', long, default_value_t = 20, value_parser = clap::value_parser!(u32).range(1..=64))]
+    min_overlap: u32,
+
+    /// Assembly method
+    #[arg(short, long, value_enum, default_value_t = CliMethod::All)]
+    method: CliMethod,
+}
+
+fn parse_fasta(path: &Path) -> std::io::Result<Vec<Vec<u8>>> {
     let content = fs::read_to_string(path)?;
     let (seqs, skipped) = parse_fasta_str(&content);
     if skipped > 0 {
@@ -18,90 +56,16 @@ fn parse_fasta(path: &str) -> std::io::Result<Vec<Vec<u8>>> {
     Ok(seqs)
 }
 
-fn usage() -> ! {
-    eprintln!("Usage: oligraph-rs <input.fasta> [output.gfa] [-l <min_overlap>] [--assembly-method <all|pca>]");
-    eprintln!("  input.fasta                Input FASTA file of sequences");
-    eprintln!("  output.gfa                 Output GFA file (default: stdout, GFA only)");
-    eprintln!("                             Also writes .fasta alongside the .gfa");
-    eprintln!("  -l <min>                   Minimum overlap length (default: 20, max: 32)");
-    eprintln!("  --assembly-method <method>  Assembly method filter (default: all)");
-    std::process::exit(1);
-}
-
 fn main() {
-    let args: Vec<String> = env::args().collect();
-    if args.len() < 2 {
-        usage();
-    }
+    let cli = Cli::parse();
 
-    let mut fasta_path: Option<&str> = None;
-    let mut gfa_path: Option<&str> = None;
-    let mut l_min: u32 = 20;
-    let mut assembly_method = AssemblyMethod::All;
-
-    let mut i = 1;
-    while i < args.len() {
-        match args[i].as_str() {
-            "-l" => {
-                i += 1;
-                if i >= args.len() {
-                    eprintln!("error: -l requires a value");
-                    usage();
-                }
-                l_min = args[i].parse().unwrap_or_else(|_| {
-                    eprintln!("error: invalid value for -l: {}", args[i]);
-                    usage();
-                });
-            }
-            "--assembly-method" => {
-                i += 1;
-                if i >= args.len() {
-                    eprintln!("error: --assembly-method requires a value");
-                    usage();
-                }
-                assembly_method = match args[i].as_str() {
-                    "all" => AssemblyMethod::All,
-                    "pca" => AssemblyMethod::Pca,
-                    _ => {
-                        eprintln!("error: unknown assembly method '{}' (expected: all, pca)", args[i]);
-                        usage();
-                    }
-                };
-            }
-            "-" | "--" => {
-                eprintln!("error: unknown flag: {}", args[i]);
-                usage();
-            }
-            arg if arg.starts_with('-') => {
-                eprintln!("error: unknown flag: {}", arg);
-                usage();
-            }
-            _ => {
-                if fasta_path.is_none() {
-                    fasta_path = Some(&args[i]);
-                } else if gfa_path.is_none() {
-                    gfa_path = Some(&args[i]);
-                } else {
-                    eprintln!("error: unexpected argument: {}", args[i]);
-                    usage();
-                }
-            }
-        }
-        i += 1;
-    }
-
-    let fasta_path = fasta_path.unwrap_or_else(|| {
-        eprintln!("error: no input FASTA file specified");
-        usage();
-    });
-
-    let seqs = parse_fasta(fasta_path).unwrap_or_else(|e| {
-        eprintln!("error reading {}: {}", fasta_path, e);
+    let seqs = parse_fasta(&cli.input).unwrap_or_else(|e| {
+        eprintln!("error reading {}: {}", cli.input.display(), e);
         std::process::exit(1);
     });
 
     if seqs.is_empty() {
-        eprintln!("error: no sequences found in {}", fasta_path);
+        eprintln!("error: no sequences found in {}", cli.input.display());
         std::process::exit(1);
     }
 
@@ -114,72 +78,66 @@ fn main() {
         std::process::exit(1);
     }
 
+    let l_min = cli.min_overlap;
+    let assembly_method = AssemblyMethod::from(cli.method);
+
     eprintln!(
-        "loaded {} sequences (lengths {}-{}) with l_min={}, assembly_method={}",
+        "loaded {} sequences (lengths {}-{}) with l_min={}",
         seqs.len(),
         seqs.iter().map(|s| s.len()).min().unwrap(),
         max_len,
         l_min,
-        match assembly_method {
-            AssemblyMethod::All => "all",
-            AssemblyMethod::Pca => "pca",
-        }
     );
 
     let seq_refs: Vec<&[u8]> = seqs.iter().map(|s| s.as_slice()).collect();
     let edges = build_overlap_graph::<LIMBS>(&seq_refs, l_min, assembly_method);
     eprintln!("found {} edges", edges.len());
 
-    match gfa_path {
-        Some(path) => {
-            let gfa_file = File::create(path).unwrap_or_else(|e| {
-                eprintln!("error creating {}: {}", path, e);
+    let prefix = &cli.output;
+    if let Some(parent) = prefix.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent).unwrap_or_else(|e| {
+                eprintln!("error creating directory {}: {}", parent.display(), e);
                 std::process::exit(1);
             });
-            if let Err(e) = write_gfa(&seq_refs, &edges, BufWriter::new(gfa_file), assembly_method)
-            {
-                eprintln!("error writing GFA: {}", e);
-                std::process::exit(1);
-            }
-
-            let fasta_path = Path::new(path).with_extension("fasta");
-            let fasta_file = File::create(&fasta_path).unwrap_or_else(|e| {
-                eprintln!("error creating {}: {}", fasta_path.display(), e);
-                std::process::exit(1);
-            });
-            if let Err(e) = write_fasta(&seq_refs, &edges, BufWriter::new(fasta_file)) {
-                eprintln!("error writing FASTA: {}", e);
-                std::process::exit(1);
-            }
-            eprintln!("wrote {}", fasta_path.display());
-
-            let contigs = assemble_contigs(&seq_refs, &edges);
-            if !contigs.is_empty() {
-                let contigs_path = Path::new(path).with_extension("contigs.fasta");
-                let contigs_file = File::create(&contigs_path).unwrap_or_else(|e| {
-                    eprintln!("error creating {}: {}", contigs_path.display(), e);
-                    std::process::exit(1);
-                });
-                if let Err(e) = write_contigs_fasta(&contigs, BufWriter::new(contigs_file)) {
-                    eprintln!("error writing contigs: {}", e);
-                    std::process::exit(1);
-                }
-                eprintln!(
-                    "wrote {} ({} contigs)",
-                    contigs_path.display(),
-                    contigs.len()
-                );
-            } else {
-                eprintln!("no contigs assembled (no connected components with edges)");
-            }
         }
-        None => {
-            if let Err(e) =
-                write_gfa(&seq_refs, &edges, BufWriter::new(std::io::stdout()), assembly_method)
-            {
-                eprintln!("error writing GFA: {}", e);
-                std::process::exit(1);
-            }
+    }
+
+    let gfa_path = prefix.with_extension("gfa");
+    let gfa_file = File::create(&gfa_path).unwrap_or_else(|e| {
+        eprintln!("error creating {}: {}", gfa_path.display(), e);
+        std::process::exit(1);
+    });
+    if let Err(e) = write_gfa(&seq_refs, &edges, BufWriter::new(gfa_file), assembly_method) {
+        eprintln!("error writing GFA: {}", e);
+        std::process::exit(1);
+    }
+    eprintln!("wrote {}", gfa_path.display());
+
+    let fasta_out_path = prefix.with_extension("fasta");
+    let fasta_file = File::create(&fasta_out_path).unwrap_or_else(|e| {
+        eprintln!("error creating {}: {}", fasta_out_path.display(), e);
+        std::process::exit(1);
+    });
+    if let Err(e) = write_fasta(&seq_refs, &edges, BufWriter::new(fasta_file)) {
+        eprintln!("error writing FASTA: {}", e);
+        std::process::exit(1);
+    }
+    eprintln!("wrote {}", fasta_out_path.display());
+
+    let contigs = assemble_contigs(&seq_refs, &edges);
+    if !contigs.is_empty() {
+        let contigs_path = prefix.with_extension("contigs.fasta");
+        let contigs_file = File::create(&contigs_path).unwrap_or_else(|e| {
+            eprintln!("error creating {}: {}", contigs_path.display(), e);
+            std::process::exit(1);
+        });
+        if let Err(e) = write_contigs_fasta(&contigs, BufWriter::new(contigs_file)) {
+            eprintln!("error writing contigs: {}", e);
+            std::process::exit(1);
         }
+        eprintln!("wrote {} ({} contigs)", contigs_path.display(), contigs.len());
+    } else {
+        eprintln!("no contigs assembled (no connected components with edges)");
     }
 }

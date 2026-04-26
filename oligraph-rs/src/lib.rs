@@ -5,10 +5,9 @@ use rustc_hash::FxHashMap;
 // ============================================================
 // A = 00, C = 01, G = 10, T = 11
 // Stored little-endian in u64 limbs: position 0 in bits 0..2 of limb 0, etc.
-// Up to 64bp per limb. 80bp -> [u64; 2] with 48 bits unused in the second limb.
+// LIMBS: choose so that 32*LIMBS >= max sequence length (2 bits/base, 32 bases per u64 limb).
 //
 // We use a const generic over LIMBS so the same code handles different lengths.
-// For an 80bp pool, LIMBS = 2.
 
 pub const LIMBS: usize = 10;
 
@@ -26,8 +25,8 @@ fn nuc_to_2bit(b: u8) -> u8 {
 }
 
 #[inline]
-fn revcomp_u64(key: u64, len: u32) -> u64 {
-    let mut out = 0u64;
+fn revcomp_seed(key: u128, len: u32) -> u128 {
+    let mut out = 0u128;
     for i in 0..len {
         let base = (key >> (2 * i)) & 0b11;
         out |= (base ^ 0b11) << (2 * (len - 1 - i));
@@ -78,6 +77,15 @@ impl<const LIMBS: usize> Packed<LIMBS> {
     #[inline]
     fn base_at(&self, i: usize) -> u64 {
         (self.limbs[i / 32] >> ((i % 32) * 2)) & 0b11
+    }
+
+    /// Extract up to 64 bases (128 bits) spanning the first two limbs as a u128.
+    /// `mask` selects the relevant bits; e.g. for a 40-base seed use `(1u128 << 80) - 1`.
+    #[inline]
+    fn seed(&self, mask: u128) -> u128 {
+        let lo = self.limbs[0] as u128;
+        let hi = if LIMBS > 1 { self.limbs[1] as u128 } else { 0 };
+        (lo | (hi << 64)) & mask
     }
 
     fn match_range<const M: usize>(
@@ -197,6 +205,9 @@ impl UnionFind {
 // ============================================================
 // Build overlap graph
 // ============================================================
+//
+// LIMBS: choose so that 32*LIMBS >= max sequence length (2 bits/base, 32 bases per u64 limb).
+// L_MIN: minimum overlap length (must be <= 64 for the seed-key fits-in-u128 invariant).
 
 pub fn build_overlap_graph<const LIMBS: usize>(
     seqs: &[&[u8]],
@@ -204,12 +215,17 @@ pub fn build_overlap_graph<const LIMBS: usize>(
     assembly_method: AssemblyMethod,
 ) -> Vec<Edge> {
     assert!(
-        (1..=32).contains(&l_min),
-        "l_min must fit in a u64 seed (<=32)"
+        (1..=64).contains(&l_min),
+        "l_min must fit in a u128 seed (<=64)"
     );
 
     let n_seqs = seqs.len();
 
+    #[cfg(feature = "progress")]
+    let t0 = std::time::Instant::now();
+
+    // ---- 1. Pack forward + RC ---------------------------------------------
+    // packed[0..n_seqs]: forward strands, packed[n_seqs..2*n_seqs]: RC (for verification)
     let mut packed: Vec<Packed<LIMBS>> = Vec::with_capacity(2 * n_seqs);
     for s in seqs {
         let p = Packed::<LIMBS>::from_bytes(s).expect("non-ACGT base");
@@ -220,13 +236,18 @@ pub fn build_overlap_graph<const LIMBS: usize>(
         packed.push(rc);
     }
 
-    let mask: u64 = if l_min == 32 {
-        u64::MAX
+    // ---- 2. Index every prefix of length L_min -----------------------------
+    //
+    // Key: u128 holding the L_min 2-bit values (low 2*L_min bits).
+    // Value: Vec<(seq_id, strand)> — tagged so we know which orientation matched.
+
+    let mask: u128 = if l_min == 64 {
+        u128::MAX
     } else {
-        (1u64 << (2 * l_min)) - 1
+        (1u128 << (2 * l_min)) - 1
     };
 
-    let mut prefix_index: FxHashMap<u64, Vec<(u32, Strand)>> =
+    let mut prefix_index: FxHashMap<u128, Vec<(u32, Strand)>> =
         FxHashMap::with_capacity_and_hasher(2 * n_seqs, Default::default());
 
     for i in 0..n_seqs {
@@ -234,19 +255,37 @@ pub fn build_overlap_graph<const LIMBS: usize>(
         if fwd.len < l_min {
             continue;
         }
-        let fwd_key = fwd.limbs[0] & mask;
+        let fwd_key = fwd.seed(mask);
         prefix_index
             .entry(fwd_key)
             .or_default()
             .push((i as u32, Strand::Fwd));
 
         let rc = &packed[n_seqs + i];
-        let rc_key = rc.limbs[0] & mask;
+        let rc_key = rc.seed(mask);
         prefix_index
             .entry(rc_key)
             .or_default()
             .push((i as u32, Strand::Rev));
     }
+
+    #[cfg(feature = "progress")]
+    {
+        let t_index = std::time::Instant::now();
+        let total_candidates: usize = prefix_index.values().map(|v| v.len()).sum();
+        eprintln!(
+            "[index]  {:.3}s  ({} unique seeds, {} indexed candidates)",
+            t_index.duration_since(t0).as_secs_f64(),
+            prefix_index.len(),
+            total_candidates
+        );
+    }
+
+    // ---- 3. Seed-and-extend (single forward scan, dual rolling seeds) ------
+    //
+    // For each forward sequence A, at each suffix position p:
+    //   fwd_key = A_fwd[p..p+l_min]          -> types 1, 2
+    //   rc_key  = revcomp(A_fwd[p..p+l_min])  -> type 3 (skip type 4)
 
     let mut raw: Vec<Edge> = Vec::new();
 
@@ -276,8 +315,8 @@ pub fn build_overlap_graph<const LIMBS: usize>(
         let len_a = pa.len;
         let last_p = (len_a - l_min) as usize;
 
-        let mut fwd_key: u64 = pa.limbs[0] & mask;
-        let mut rc_key: u64 = revcomp_u64(fwd_key, l_min);
+        let mut fwd_key: u128 = pa.seed(mask);
+        let mut rc_key: u128 = revcomp_seed(fwd_key, l_min);
 
         for p in 0..=last_p {
             if let Some(candidates) = prefix_index.get(&fwd_key) {
@@ -345,7 +384,7 @@ pub fn build_overlap_graph<const LIMBS: usize>(
             }
 
             if p < last_p {
-                let new_base = pa.base_at(p + l_min as usize);
+                let new_base = pa.base_at(p + l_min as usize) as u128;
                 fwd_key = (fwd_key >> 2) | (new_base << (2 * (l_min - 1)));
                 rc_key = ((rc_key << 2) | (new_base ^ 0b11)) & mask;
             }
@@ -355,7 +394,28 @@ pub fn build_overlap_graph<const LIMBS: usize>(
     #[cfg(feature = "progress")]
     pb.finish_with_message("done");
 
-    canonicalize_and_dedup(raw)
+    #[cfg(feature = "progress")]
+    {
+        let t_scan = std::time::Instant::now();
+        eprintln!(
+            "[scan]   {:.3}s  ({} seqs, {} raw edges)",
+            t_scan.duration_since(t0).as_secs_f64(),
+            n_seqs,
+            raw.len()
+        );
+    }
+
+    // ---- 4. Dedup, keep max overlap per canonical edge ---------------------
+    let raw_count = raw.len();
+    let deduped = canonicalize_and_dedup(raw);
+
+    #[cfg(feature = "progress")]
+    eprintln!("[dedup]  ({} raw -> {} deduped)", raw_count, deduped.len());
+
+    #[cfg(not(feature = "progress"))]
+    let _ = raw_count;
+
+    deduped
 }
 
 fn canonicalize_and_dedup(edges: Vec<Edge>) -> Vec<Edge> {
@@ -834,22 +894,80 @@ mod tests {
     }
 
     #[test]
-    fn revcomp_u64_palindrome() {
-        let acgt = 0b11_10_01_00u64;
-        assert_eq!(revcomp_u64(acgt, 4), acgt);
+    fn revcomp_seed_palindrome() {
+        let acgt = 0b11_10_01_00u128;
+        assert_eq!(revcomp_seed(acgt, 4), acgt);
     }
 
     #[test]
-    fn revcomp_u64_non_palindrome() {
-        let aaac = 0b01_00_00_00u64;
-        let gttt = 0b11_11_11_10u64;
-        assert_eq!(revcomp_u64(aaac, 4), gttt);
+    fn revcomp_seed_non_palindrome() {
+        let aaac = 0b01_00_00_00u128;
+        let gttt = 0b11_11_11_10u128;
+        assert_eq!(revcomp_seed(aaac, 4), gttt);
     }
 
     #[test]
-    fn revcomp_u64_roundtrip() {
-        let seq = 0b10_01_11_00u64;
-        assert_eq!(revcomp_u64(revcomp_u64(seq, 4), 4), seq);
+    fn revcomp_seed_short_roundtrip() {
+        let seq = 0b10_01_11_00u128;
+        assert_eq!(revcomp_seed(revcomp_seed(seq, 4), 4), seq);
+    }
+
+    #[test]
+    fn revcomp_seed_cross_limb() {
+        // 34 A's (all zeros) -> 34 T's (all 0b11), needs 68 bits > u64
+        let all_a: u128 = 0;
+        let all_t: u128 = (1u128 << 68) - 1;
+        assert_eq!(revcomp_seed(all_a, 34), all_t);
+    }
+
+    #[test]
+    fn revcomp_seed_roundtrip_36() {
+        // Non-palindromic 36-base key crossing u64 boundary
+        let bases: [u128; 5] = [0, 0, 1, 2, 3];
+        let mut key: u128 = 0;
+        for i in 0..36u32 {
+            key |= bases[i as usize % 5] << (2 * i);
+        }
+        assert_eq!(revcomp_seed(revcomp_seed(key, 36), 36), key);
+    }
+
+    #[test]
+    fn packed_seed_single_limb() {
+        let seq = b"ACGTACGTACGTACGT";
+        let p = Packed::<2>::from_bytes(seq).unwrap();
+        let mask: u128 = (1u128 << 32) - 1;
+        let seed = p.seed(mask);
+        assert_eq!(seed, p.limbs[0] as u128 & mask);
+    }
+
+    #[test]
+    fn packed_seed_cross_limb() {
+        // 40 bases: 32 in limb[0], 8 in limb[1]
+        let seq = b"ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT";
+        let p = Packed::<2>::from_bytes(seq).unwrap();
+        let mask: u128 = (1u128 << 80) - 1;
+        let seed = p.seed(mask);
+        assert_eq!(seed & 0b11, 0);           // position 0: A=0
+        assert_eq!((seed >> 2) & 0b11, 1);    // position 1: C=1
+        assert_eq!((seed >> 64) & 0b11, 0);   // position 32: A=0 (crosses into limb[1])
+        assert_eq!((seed >> 66) & 0b11, 1);   // position 33: C=1
+    }
+
+    #[test]
+    fn cross_limb_overlap_l_min_35() {
+        // 50bp sequences with 40bp overlap, l_min=35 requires u128 seeds (70 bits)
+        let s0: &[u8] = b"TTTTTTTTTTACGTCGATCGATCGATCGATCGATCGATCGATCGATCGAT";
+        let s1: &[u8] = b"ACGTCGATCGATCGATCGATCGATCGATCGATCGATCGATGGGGGGGGGG";
+        let edges = build_overlap_graph::<2>(&[s0, s1], 35, AssemblyMethod::All);
+        assert!(
+            edges.iter().any(|e| e.from_id == 0
+                && e.to_id == 1
+                && e.from_strand == Strand::Fwd
+                && e.to_strand == Strand::Fwd
+                && e.overlap_len == 40),
+            "expected Fwd->Fwd edge with overlap 40 at l_min=35, got: {:?}",
+            edges
+        );
     }
 
     #[test]
@@ -932,26 +1050,10 @@ mod tests {
             })
         };
 
-        assert!(
-            has_edge(0, Strand::Fwd, 1, Strand::Fwd, 8),
-            "expected 0+ -> 1+ overlap 8, got: {:?}",
-            edges
-        );
-        assert!(
-            has_edge(1, Strand::Fwd, 2, Strand::Fwd, 8),
-            "expected 1+ -> 2+ overlap 8, got: {:?}",
-            edges
-        );
-        assert!(
-            has_edge(0, Strand::Fwd, 2, Strand::Fwd, 4),
-            "expected 0+ -> 2+ overlap 4, got: {:?}",
-            edges
-        );
-        assert!(
-            has_edge(1, Strand::Fwd, 0, Strand::Rev, 4),
-            "expected 1+ -> 0- overlap 4, got: {:?}",
-            edges
-        );
+        assert!(has_edge(0, Strand::Fwd, 1, Strand::Fwd, 8), "expected 0+ -> 1+ overlap 8, got: {:?}", edges);
+        assert!(has_edge(1, Strand::Fwd, 2, Strand::Fwd, 8), "expected 1+ -> 2+ overlap 8, got: {:?}", edges);
+        assert!(has_edge(0, Strand::Fwd, 2, Strand::Fwd, 4), "expected 0+ -> 2+ overlap 4, got: {:?}", edges);
+        assert!(has_edge(1, Strand::Fwd, 0, Strand::Rev, 4), "expected 1+ -> 0- overlap 4, got: {:?}", edges);
     }
 
     #[test]
@@ -1013,20 +1115,12 @@ mod tests {
 
         let mut buf_all = Vec::new();
         write_gfa(seqs, edges, &mut buf_all, AssemblyMethod::All).unwrap();
-        let header_all = std::str::from_utf8(&buf_all)
-            .unwrap()
-            .lines()
-            .next()
-            .unwrap();
+        let header_all = std::str::from_utf8(&buf_all).unwrap().lines().next().unwrap();
         assert_eq!(header_all, "H\tVN:Z:1.0");
 
         let mut buf_pca = Vec::new();
         write_gfa(seqs, edges, &mut buf_pca, AssemblyMethod::Pca).unwrap();
-        let header_pca = std::str::from_utf8(&buf_pca)
-            .unwrap()
-            .lines()
-            .next()
-            .unwrap();
+        let header_pca = std::str::from_utf8(&buf_pca).unwrap().lines().next().unwrap();
         assert_eq!(header_pca, "H\tVN:Z:1.0\tam:Z:pca");
     }
 
@@ -1034,20 +1128,8 @@ mod tests {
     fn fasta_output_format() {
         let seqs: Vec<&[u8]> = vec![b"ACGTACGT", b"CGTACGTT", b"TTTTAAAA"];
         let edges = vec![
-            Edge {
-                from_id: 0,
-                from_strand: Strand::Fwd,
-                to_id: 1,
-                to_strand: Strand::Fwd,
-                overlap_len: 7,
-            },
-            Edge {
-                from_id: 0,
-                from_strand: Strand::Rev,
-                to_id: 2,
-                to_strand: Strand::Fwd,
-                overlap_len: 4,
-            },
+            Edge { from_id: 0, from_strand: Strand::Fwd, to_id: 1, to_strand: Strand::Fwd, overlap_len: 7 },
+            Edge { from_id: 0, from_strand: Strand::Rev, to_id: 2, to_strand: Strand::Fwd, overlap_len: 4 },
         ];
         let mut buf = Vec::new();
         write_fasta(&seqs, &edges, &mut buf).unwrap();
