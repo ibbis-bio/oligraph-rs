@@ -5,8 +5,8 @@ use graph_view::{EdgeKind, EdgeView, GraphData, GraphView};
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use oligraph_rs::{
-    AssemblyMethod, Contig, LIMBS, Strand, Topology, assemble_contigs, build_overlap_graph,
-    parse_fasta_str,
+    assemble_contigs, build_overlap_graph, parse_fasta_str, AssemblyMethod, Contig, Strand,
+    Topology, LIMBS,
 };
 use wasm_bindgen::JsCast;
 use web_sys::HtmlInputElement;

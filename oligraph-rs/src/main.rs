@@ -27,7 +27,7 @@ impl From<CliMethod> for AssemblyMethod {
 #[command(
     name = "oligraph",
     version,
-    about = "Overlap graph builder and contig assembler for oligonucleotide pools",
+    about = "Overlap graph builder and contig assembler for oligonucleotide pools"
 )]
 struct Cli {
     /// Input FASTA file
@@ -73,7 +73,9 @@ fn main() {
     if max_len > LIMBS * 32 {
         eprintln!(
             "error: sequence length {} exceeds capacity of LIMBS={} (max {}bp). Recompile with larger LIMBS.",
-            max_len, LIMBS, LIMBS * 32
+            max_len,
+            LIMBS,
+            LIMBS * 32
         );
         std::process::exit(1);
     }
@@ -136,7 +138,11 @@ fn main() {
             eprintln!("error writing contigs: {}", e);
             std::process::exit(1);
         }
-        eprintln!("wrote {} ({} contigs)", contigs_path.display(), contigs.len());
+        eprintln!(
+            "wrote {} ({} contigs)",
+            contigs_path.display(),
+            contigs.len()
+        );
     } else {
         eprintln!("no contigs assembled (no connected components with edges)");
     }

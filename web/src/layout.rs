@@ -142,5 +142,10 @@ pub fn bounding_box(positions: &[(f32, f32)]) -> (f32, f32, f32, f32) {
     let h = (max_y - min_y).max(50.0);
     let pad_x = w * 0.1;
     let pad_y = h * 0.1;
-    (min_x - pad_x, min_y - pad_y, w + 2.0 * pad_x, h + 2.0 * pad_y)
+    (
+        min_x - pad_x,
+        min_y - pad_y,
+        w + 2.0 * pad_x,
+        h + 2.0 * pad_y,
+    )
 }

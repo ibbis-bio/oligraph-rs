@@ -95,7 +95,12 @@ pub fn GraphView(graph: GraphData) -> impl IntoView {
     let svg_rect = move || -> Option<(f32, f32, f32, f32)> {
         svg_ref.get_untracked().map(|el| {
             let r = el.get_bounding_client_rect();
-            (r.x() as f32, r.y() as f32, r.width() as f32, r.height() as f32)
+            (
+                r.x() as f32,
+                r.y() as f32,
+                r.width() as f32,
+                r.height() as f32,
+            )
         })
     };
 
@@ -212,13 +217,8 @@ pub fn GraphView(graph: GraphData) -> impl IntoView {
                     );
                     if from == to {
                         let r = 8.0;
-                        let path = format!(
-                            "M {} {} a {r} {r} 0 1 1 {} {}",
-                            x1 + r,
-                            y1,
-                            -2.0 * r,
-                            0.001
-                        );
+                        let path =
+                            format!("M {} {} a {r} {r} 0 1 1 {} {}", x1 + r, y1, -2.0 * r, 0.001);
                         view! {
                             <path
                                 d=path
@@ -264,7 +264,11 @@ pub fn GraphView(graph: GraphData) -> impl IntoView {
                         let title_text = format!("oligo {} ({} bp)", i, length);
                         let on_node_down = move |ev: web_sys::PointerEvent| {
                             ev.stop_propagation();
-                            let pos_i = positions.get_untracked().get(i).copied().unwrap_or((0.0, 0.0));
+                            let pos_i = positions
+                                .get_untracked()
+                                .get(i)
+                                .copied()
+                                .unwrap_or((0.0, 0.0));
                             drag.set_value(DragState::Node {
                                 id: i,
                                 start_x: pos_i.0,

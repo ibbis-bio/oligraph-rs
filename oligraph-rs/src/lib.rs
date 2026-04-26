@@ -287,8 +287,6 @@ pub fn build_overlap_graph<const LIMBS: usize>(
     //   fwd_key = A_fwd[p..p+l_min]          -> types 1, 2
     //   rc_key  = revcomp(A_fwd[p..p+l_min])  -> type 3 (skip type 4)
 
-    let mut raw: Vec<Edge> = Vec::new();
-
     #[cfg(feature = "progress")]
     let pb = {
         let pb = indicatif::ProgressBar::new(n_seqs as u64);
@@ -301,6 +299,8 @@ pub fn build_overlap_graph<const LIMBS: usize>(
         );
         pb
     };
+
+    let mut raw: Vec<Edge> = Vec::new();
 
     for seq_a in 0..n_seqs {
         #[cfg(feature = "progress")]
@@ -366,12 +366,7 @@ pub fn build_overlap_graph<const LIMBS: usize>(
                     if seq_a as u32 == seq_b && overlap == len_a {
                         continue;
                     }
-                    if pa_rc.match_range(
-                        (len_a - p as u32) as usize,
-                        pb_fwd,
-                        l_min as usize,
-                        p,
-                    ) {
+                    if pa_rc.match_range((len_a - p as u32) as usize, pb_fwd, l_min as usize, p) {
                         raw.push(Edge {
                             from_id: seq_a as u32,
                             from_strand: Strand::Rev,
@@ -554,11 +549,7 @@ fn greedy_walk(
     (path, overlaps, branches)
 }
 
-fn pick_start(
-    comp: &[u32],
-    adj: &[Vec<(u32, Strand, u32)>],
-    visited: &[bool],
-) -> (u32, Strand) {
+fn pick_start(comp: &[u32], adj: &[Vec<(u32, Strand, u32)>], visited: &[bool]) -> (u32, Strand) {
     let mut best_tip: Option<(u32, Strand, u32)> = None;
     for &id in comp {
         if visited[id as usize] {
@@ -568,7 +559,9 @@ fn pick_start(
             let idx = id as usize * 2 + (strand == Strand::Rev) as usize;
             let flip_idx = id as usize * 2 + (flip(strand) == Strand::Rev) as usize;
             let has_fwd = adj[idx].iter().any(|&(nid, _, _)| !visited[nid as usize]);
-            let has_flip = adj[flip_idx].iter().any(|&(nid, _, _)| !visited[nid as usize]);
+            let has_flip = adj[flip_idx]
+                .iter()
+                .any(|&(nid, _, _)| !visited[nid as usize]);
             if has_fwd && !has_flip {
                 let max_ov = adj[idx]
                     .iter()
@@ -626,8 +619,7 @@ fn greedy_bidirectional_walk(
 ) -> (Vec<(u32, Strand)>, Vec<u32>, u32) {
     let (start_id, start_strand) = pick_start(comp, adj, visited);
 
-    let (fwd_path, fwd_overlaps, fwd_branches) =
-        greedy_walk(start_id, start_strand, adj, visited);
+    let (fwd_path, fwd_overlaps, fwd_branches) = greedy_walk(start_id, start_strand, adj, visited);
 
     let (bwd_path, bwd_overlaps, bwd_branches) =
         greedy_walk(start_id, flip(start_strand), adj, visited);
@@ -651,10 +643,7 @@ fn greedy_bidirectional_walk(
     (prefix_path, prefix_overlaps, total_branches)
 }
 
-fn detect_topology(
-    path: &[(u32, Strand)],
-    adj: &[Vec<(u32, Strand, u32)>],
-) -> Topology {
+fn detect_topology(path: &[(u32, Strand)], adj: &[Vec<(u32, Strand, u32)>]) -> Topology {
     if path.len() < 2 {
         return Topology::Linear;
     }
@@ -682,7 +671,10 @@ fn stitch(path: &[(u32, Strand)], overlaps: &[u32], seqs: &[&[u8]]) -> Vec<u8> {
         }
     }
 
-    let total_estimate: usize = path.iter().map(|&(id, _)| seqs[id as usize].len()).sum::<usize>()
+    let total_estimate: usize = path
+        .iter()
+        .map(|&(id, _)| seqs[id as usize].len())
+        .sum::<usize>()
         - overlaps.iter().map(|&o| o as usize).sum::<usize>();
     let mut buf: Vec<u8> = Vec::with_capacity(total_estimate);
 
@@ -751,8 +743,7 @@ pub fn assemble_contigs(seqs: &[&[u8]], edges: &[Edge]) -> Vec<Contig> {
 
     for (comp_idx, comp) in components.iter().enumerate() {
         while comp.iter().any(|&id| !visited[id as usize]) {
-            let (path, overlaps, branches) =
-                greedy_bidirectional_walk(comp, &adj, &mut visited);
+            let (path, overlaps, branches) = greedy_bidirectional_walk(comp, &adj, &mut visited);
 
             let topology = detect_topology(&path, &adj);
             let sequence = stitch(&path, &overlaps, seqs);
@@ -777,10 +768,7 @@ pub fn assemble_contigs(seqs: &[&[u8]], edges: &[Edge]) -> Vec<Contig> {
     contigs
 }
 
-pub fn write_contigs_fasta<W: std::io::Write>(
-    contigs: &[Contig],
-    mut w: W,
-) -> std::io::Result<()> {
+pub fn write_contigs_fasta<W: std::io::Write>(contigs: &[Contig], mut w: W) -> std::io::Result<()> {
     for (i, c) in contigs.iter().enumerate() {
         let topo = match c.topology {
             Topology::Linear => "linear",
@@ -872,9 +860,11 @@ mod tests {
         let s0: &[u8] = b"ACGTACGT";
         let s1: &[u8] = b"GGGGACGTACGTGGGG";
         let edges = build_overlap_graph::<1>(&[s0, s1], 6, AssemblyMethod::All);
-        assert!(!edges
-            .iter()
-            .any(|e| (e.from_id == 0 && e.to_id == 1) || (e.from_id == 1 && e.to_id == 0)));
+        assert!(
+            !edges
+                .iter()
+                .any(|e| (e.from_id == 0 && e.to_id == 1) || (e.from_id == 1 && e.to_id == 0))
+        );
     }
 
     #[test]
@@ -947,10 +937,10 @@ mod tests {
         let p = Packed::<2>::from_bytes(seq).unwrap();
         let mask: u128 = (1u128 << 80) - 1;
         let seed = p.seed(mask);
-        assert_eq!(seed & 0b11, 0);           // position 0: A=0
-        assert_eq!((seed >> 2) & 0b11, 1);    // position 1: C=1
-        assert_eq!((seed >> 64) & 0b11, 0);   // position 32: A=0 (crosses into limb[1])
-        assert_eq!((seed >> 66) & 0b11, 1);   // position 33: C=1
+        assert_eq!(seed & 0b11, 0); // position 0: A=0
+        assert_eq!((seed >> 2) & 0b11, 1); // position 1: C=1
+        assert_eq!((seed >> 64) & 0b11, 0); // position 32: A=0 (crosses into limb[1])
+        assert_eq!((seed >> 66) & 0b11, 1); // position 33: C=1
     }
 
     #[test]
@@ -1050,10 +1040,26 @@ mod tests {
             })
         };
 
-        assert!(has_edge(0, Strand::Fwd, 1, Strand::Fwd, 8), "expected 0+ -> 1+ overlap 8, got: {:?}", edges);
-        assert!(has_edge(1, Strand::Fwd, 2, Strand::Fwd, 8), "expected 1+ -> 2+ overlap 8, got: {:?}", edges);
-        assert!(has_edge(0, Strand::Fwd, 2, Strand::Fwd, 4), "expected 0+ -> 2+ overlap 4, got: {:?}", edges);
-        assert!(has_edge(1, Strand::Fwd, 0, Strand::Rev, 4), "expected 1+ -> 0- overlap 4, got: {:?}", edges);
+        assert!(
+            has_edge(0, Strand::Fwd, 1, Strand::Fwd, 8),
+            "expected 0+ -> 1+ overlap 8, got: {:?}",
+            edges
+        );
+        assert!(
+            has_edge(1, Strand::Fwd, 2, Strand::Fwd, 8),
+            "expected 1+ -> 2+ overlap 8, got: {:?}",
+            edges
+        );
+        assert!(
+            has_edge(0, Strand::Fwd, 2, Strand::Fwd, 4),
+            "expected 0+ -> 2+ overlap 4, got: {:?}",
+            edges
+        );
+        assert!(
+            has_edge(1, Strand::Fwd, 0, Strand::Rev, 4),
+            "expected 1+ -> 0- overlap 4, got: {:?}",
+            edges
+        );
     }
 
     #[test]
@@ -1062,7 +1068,9 @@ mod tests {
         let s1: &[u8] = b"ACGTACGTGGGGGG";
         let edges = build_overlap_graph::<1>(&[s0, s1], 6, AssemblyMethod::Pca);
         assert!(
-            !edges.iter().any(|e| e.from_strand == Strand::Fwd && e.to_strand == Strand::Fwd),
+            !edges
+                .iter()
+                .any(|e| e.from_strand == Strand::Fwd && e.to_strand == Strand::Fwd),
             "PCA mode should drop Type 1 (Fwd->Fwd) edges, got: {:?}",
             edges
         );
@@ -1115,12 +1123,20 @@ mod tests {
 
         let mut buf_all = Vec::new();
         write_gfa(seqs, edges, &mut buf_all, AssemblyMethod::All).unwrap();
-        let header_all = std::str::from_utf8(&buf_all).unwrap().lines().next().unwrap();
+        let header_all = std::str::from_utf8(&buf_all)
+            .unwrap()
+            .lines()
+            .next()
+            .unwrap();
         assert_eq!(header_all, "H\tVN:Z:1.0");
 
         let mut buf_pca = Vec::new();
         write_gfa(seqs, edges, &mut buf_pca, AssemblyMethod::Pca).unwrap();
-        let header_pca = std::str::from_utf8(&buf_pca).unwrap().lines().next().unwrap();
+        let header_pca = std::str::from_utf8(&buf_pca)
+            .unwrap()
+            .lines()
+            .next()
+            .unwrap();
         assert_eq!(header_pca, "H\tVN:Z:1.0\tam:Z:pca");
     }
 
@@ -1128,8 +1144,20 @@ mod tests {
     fn fasta_output_format() {
         let seqs: Vec<&[u8]> = vec![b"ACGTACGT", b"CGTACGTT", b"TTTTAAAA"];
         let edges = vec![
-            Edge { from_id: 0, from_strand: Strand::Fwd, to_id: 1, to_strand: Strand::Fwd, overlap_len: 7 },
-            Edge { from_id: 0, from_strand: Strand::Rev, to_id: 2, to_strand: Strand::Fwd, overlap_len: 4 },
+            Edge {
+                from_id: 0,
+                from_strand: Strand::Fwd,
+                to_id: 1,
+                to_strand: Strand::Fwd,
+                overlap_len: 7,
+            },
+            Edge {
+                from_id: 0,
+                from_strand: Strand::Rev,
+                to_id: 2,
+                to_strand: Strand::Fwd,
+                overlap_len: 4,
+            },
         ];
         let mut buf = Vec::new();
         write_fasta(&seqs, &edges, &mut buf).unwrap();
@@ -1152,10 +1180,15 @@ mod tests {
         let edges = build_overlap_graph::<1>(&[s0, s1, s2], 6, AssemblyMethod::All);
         let contigs = assemble_contigs(&[s0, s1, s2], &edges);
         for c in &contigs {
-            assert!(!c.path.iter().any(|&(id, _)| id == 2),
-                "isolated node 2 should not appear in any contig");
+            assert!(
+                !c.path.iter().any(|&(id, _)| id == 2),
+                "isolated node 2 should not appear in any contig"
+            );
         }
-        assert!(!contigs.is_empty(), "should produce at least one contig from the 0-1 edge");
+        assert!(
+            !contigs.is_empty(),
+            "should produce at least one contig from the 0-1 edge"
+        );
     }
 
     #[test]
@@ -1196,15 +1229,23 @@ mod tests {
         let contigs = assemble_contigs(&[a, b, c], &edges);
         let full_chain = contigs.iter().find(|ct| ct.path.len() >= 3);
         assert!(
-            full_chain.is_some() || contigs.iter().any(|ct| {
-                let ids: Vec<u32> = ct.path.iter().map(|&(id, _)| id).collect();
-                ids.contains(&0) && ids.contains(&1) && ids.contains(&2)
-            }),
+            full_chain.is_some()
+                || contigs.iter().any(|ct| {
+                    let ids: Vec<u32> = ct.path.iter().map(|&(id, _)| id).collect();
+                    ids.contains(&0) && ids.contains(&1) && ids.contains(&2)
+                }),
             "expected a contig containing all three nodes, got: {:?}",
-            contigs.iter().map(|ct| {
-                let ids: Vec<u32> = ct.path.iter().map(|&(id, _)| id).collect();
-                format!("ids={:?} seq={}", ids, String::from_utf8_lossy(&ct.sequence))
-            }).collect::<Vec<_>>()
+            contigs
+                .iter()
+                .map(|ct| {
+                    let ids: Vec<u32> = ct.path.iter().map(|&(id, _)| id).collect();
+                    format!(
+                        "ids={:?} seq={}",
+                        ids,
+                        String::from_utf8_lossy(&ct.sequence)
+                    )
+                })
+                .collect::<Vec<_>>()
         );
     }
 
@@ -1222,7 +1263,11 @@ mod tests {
             "longest contig should include node 0, path: {:?}",
             longest.path
         );
-        assert!(contigs.len() >= 2, "expected at least 2 contigs from branching graph, got {}", contigs.len());
+        assert!(
+            contigs.len() >= 2,
+            "expected at least 2 contigs from branching graph, got {}",
+            contigs.len()
+        );
     }
 
     #[test]
@@ -1257,10 +1302,18 @@ mod tests {
         let seqs: &[&[u8]] = &[a, b, c];
         let edges = build_overlap_graph::<1>(seqs, 4, AssemblyMethod::All);
         let contigs = assemble_contigs(seqs, &edges);
-        assert_eq!(contigs.len(), 1, "expected 1 contig from linear chain, got {}", contigs.len());
+        assert_eq!(
+            contigs.len(),
+            1,
+            "expected 1 contig from linear chain, got {}",
+            contigs.len()
+        );
         let ids: Vec<u32> = contigs[0].path.iter().map(|&(id, _)| id).collect();
-        assert!(ids.contains(&0) && ids.contains(&1) && ids.contains(&2),
-            "backward walk should capture full chain, path ids: {:?}", ids);
+        assert!(
+            ids.contains(&0) && ids.contains(&1) && ids.contains(&2),
+            "backward walk should capture full chain, path ids: {:?}",
+            ids
+        );
     }
 
     #[test]
@@ -1274,13 +1327,22 @@ mod tests {
         let seqs: &[&[u8]] = &[s0, s1, s2, s3, s4, s5];
         let edges = build_overlap_graph::<1>(seqs, 6, AssemblyMethod::All);
         let contigs = assemble_contigs(seqs, &edges);
-        assert!(contigs.len() >= 2, "expected at least 2 contigs from 2 components");
-        assert!(!contigs.iter().any(|c| c.path.iter().any(|&(id, _)| id == 5)),
-            "isolated node s5 should not appear");
+        assert!(
+            contigs.len() >= 2,
+            "expected at least 2 contigs from 2 components"
+        );
+        assert!(
+            !contigs
+                .iter()
+                .any(|c| c.path.iter().any(|&(id, _)| id == 5)),
+            "isolated node s5 should not appear"
+        );
         let comp0_contig = contigs.iter().find(|c| c.component == 0).unwrap();
         let comp1_contig = contigs.iter().find(|c| c.component == 1).unwrap();
-        assert!(comp0_contig.path.len() >= comp1_contig.path.len(),
-            "component 0 should be the larger component");
+        assert!(
+            comp0_contig.path.len() >= comp1_contig.path.len(),
+            "component 0 should be the larger component"
+        );
     }
 
     #[test]
@@ -1305,9 +1367,15 @@ mod tests {
         write_contigs_fasta(&contigs, &mut buf).unwrap();
         let output = String::from_utf8(buf).unwrap();
         let lines: Vec<&str> = output.lines().collect();
-        assert_eq!(lines[0], ">contig_0 component=0 oligos=3 length=20 topology=linear branches=1 path=3+,7-,1+");
+        assert_eq!(
+            lines[0],
+            ">contig_0 component=0 oligos=3 length=20 topology=linear branches=1 path=3+,7-,1+"
+        );
         assert_eq!(lines[1], "ACGTACGTCCCCCCGGGGGG");
-        assert_eq!(lines[2], ">contig_1 component=1 oligos=1 length=8 topology=cyclic branches=0 path=5+");
+        assert_eq!(
+            lines[2],
+            ">contig_1 component=1 oligos=1 length=8 topology=cyclic branches=0 path=5+"
+        );
         assert_eq!(lines[3], "TTTTAAAA");
     }
 
@@ -1318,7 +1386,11 @@ mod tests {
         let contigs = assemble_contigs(&[s], &edges);
         assert!(contigs.len() <= 1);
         if !contigs.is_empty() {
-            assert_eq!(contigs[0].path.len(), 1, "self-edge should not produce multi-node contig");
+            assert_eq!(
+                contigs[0].path.len(),
+                1,
+                "self-edge should not produce multi-node contig"
+            );
         }
     }
 
