@@ -1,0 +1,5 @@
+/target/
+output.*
+data/
+docs/superpowers/
+.ipynb_checkpoints/
