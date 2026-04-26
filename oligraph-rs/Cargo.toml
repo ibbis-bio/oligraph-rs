@@ -1,0 +1,19 @@
+[package]
+name = "oligraph-rs"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "oligraph-rs"
+path = "src/main.rs"
+
+[features]
+default = ["progress"]
+progress = ["dep:indicatif"]
+
+[dependencies]
+rustc-hash = "2"
+indicatif = { version = "0.17", optional = true }

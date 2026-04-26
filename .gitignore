@@ -1,4 +1,5 @@
 /target/
+web/dist/
 output.*
 data/
 docs/superpowers/
