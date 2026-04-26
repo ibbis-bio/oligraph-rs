@@ -138,31 +138,19 @@ pub enum AssemblyMethod {
     Pca,
 }
 
-const HELP_TEMPLATE: &str = "\
-{name} {version}
-{about}
-
-{usage-heading} {usage}
-
-{all-args}";
-
 #[derive(Parser)]
 #[command(
     name = "oligraph",
     version,
     about = "Overlap graph builder and contig assembler for oligonucleotide pools",
-    help_template = HELP_TEMPLATE,
-    next_help_heading = "Options",
-    disable_help_flag = true,
-    disable_version_flag = true,
 )]
 struct Cli {
     /// Input FASTA file
-    #[arg(short, long, help_heading = "Required")]
+    #[arg(short, long)]
     input: PathBuf,
 
     /// Output file prefix (writes .gfa, .fasta, .contigs.fasta)
-    #[arg(short, long, help_heading = "Required")]
+    #[arg(short, long)]
     output: PathBuf,
 
     /// Minimum overlap length in bp
@@ -176,14 +164,6 @@ struct Cli {
     /// Number of threads
     #[arg(short, long, default_value_t = 1)]
     threads: usize,
-
-    /// Print help
-    #[arg(short, long, action = clap::ArgAction::Help)]
-    help: Option<bool>,
-
-    /// Print version
-    #[arg(short = 'V', long, action = clap::ArgAction::Version)]
-    version: Option<bool>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
