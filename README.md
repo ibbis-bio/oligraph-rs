@@ -1,6 +1,6 @@
 # OliGraph
 
-A graph-based screening tool for large oligonucleotide orders. OliGraph discovers overlapping relationships between DNA sequences, builds a bi-directed overlap graph, and assembles overlapping oligos into contigs. Designed for validating PCA (Polymerase Cycling Assembly) designs and detecting unintended cross-annealing in oligo pools.
+A graph-based screening tool for large oligonucleotide orders. OliGraph finds overlaps between DNA sequences, builds a bi-directed overlap graph, and assembles contigs. Built for validating PCA (Polymerase Cycling Assembly) designs and detecting unintended cross-annealing in oligo pools.
 
 Available as a CLI tool and a browser-based web app (all computation runs locally, no server required).
 
@@ -26,9 +26,9 @@ oligraph-rs -i oligos.fasta -o results -l 20 -m pca
 
 This produces three files:
 
-- `results.gfa` — overlap graph in GFA 1.0 format
-- `results.fasta` — per-sequence FASTA with edge annotations in headers
-- `results.contigs.fasta` — assembled contigs from connected components
+- `results.gfa`: overlap graph in GFA 1.0 format
+- `results.fasta`: per-sequence FASTA with edge annotations in headers
+- `results.contigs.fasta`: assembled contigs from connected components
 
 ### GFA output
 
@@ -55,22 +55,22 @@ ACGTACGT...
 | `oligos` | Number of sequences in the contig |
 | `length` | Assembled sequence length |
 | `topology` | `linear` or `cyclic` |
-| `branches` | Branch points where the greedy walk chose between multiple neighbors |
+| `branches` | Branch points where the greedy walk chose between multiple neighbours |
 | `path` | Ordered node IDs with strand (`+`/`-`) |
 
 ## How it works
 
-1. **2-bit packing** — sequences are encoded as 2 bits per base in `u64` limbs for fast comparison (up to 320 bp per sequence).
+1. **2-bit packing**: sequences are encoded as 2 bits per base in `u64` limbs for fast comparison (up to 320 bp per sequence).
 
-2. **Seed-and-extend overlap detection** — a rolling seed of length `l_min` indexes all sequence prefixes. Each suffix position is scanned against the index and verified base-by-base to find exact overlaps.
+2. **Seed-and-extend overlap detection**: a rolling seed of length `l_min` indexes all sequence prefixes. Each suffix position is scanned against the index and verified base-by-base to find exact overlaps.
 
-3. **Bi-directed graph model** — each sequence is a node that can be traversed in forward or reverse-complement orientation. Edges connect suffix-to-prefix overlaps across three effective orientations (Fwd→Fwd, Fwd→Rev, Rev→Fwd), following the BCALM2 bi-directed graph convention. Mirror-symmetric edges are canonicalised and deduplicated, keeping the longest overlap per pair.
+3. **Bi-directed graph model**: each sequence is a node that can be traversed in forward or reverse-complement orientation. Edges connect suffix-to-prefix overlaps across three effective orientations (Fwd→Fwd, Fwd→Rev, Rev→Fwd), following the BCALM2 bi-directed graph convention. Mirror-symmetric edges are canonicalised and deduplicated, keeping the longest overlap per pair.
 
-4. **Greedy contig assembly** — connected components are identified via union-find. Within each component, a bidirectional greedy walk extends from a start node, always choosing the neighbour with the longest overlap. The walk detects cyclic topology and counts branch points.
+4. **Greedy contig assembly**: connected components are identified via union-find. Within each component, a bidirectional greedy walk extends from a start node, always choosing the neighbour with the longest overlap. The walk detects cyclic topology and counts branch points.
 
 ### Edge types and PCA filtering
 
-The overlap graph uses four edge kinds based on the strand orientations of the overlapping sequences:
+Four edge kinds correspond to strand orientation pairs:
 
 | Kind | From | To | Description |
 |---|---|---|---|
@@ -81,33 +81,31 @@ The overlap graph uses four edge kinds based on the strand orientations of the o
 
 In practice only the first three kinds are produced; Rev→Rev edges are excluded during overlap detection because they are mirror-symmetric with Fwd→Fwd.
 
-In `-m pca` mode, Fwd→Fwd edges are filtered out. The remaining edges (Fwd→Rev and Rev→Fwd) represent 3'-end annealing — the physical mechanism of PCA — so the graph retains only overlaps that participate in assembly.
+In `-m pca` mode, Fwd→Fwd edges are dropped. Fwd→Rev and Rev→Fwd edges represent 3'-end annealing (the physical mechanism of PCA), so only overlaps that participate in assembly remain.
 
 ## Web app
 
-The Leptos/WASM frontend provides an interactive browser-based interface. All analysis runs locally in the browser — no data leaves the client.
+The Leptos/WASM frontend runs entirely in the browser. No data leaves the client.
 
-Features:
-
-- Upload a FASTA file and adjust minimum overlap length (1–64 bp) and assembly method in real time
-- Interactive SVG graph visualisation with drag-to-pan, scroll-to-zoom, and node dragging
-- Edge colour coding by kind (Fwd→Fwd, Fwd→Rev, Rev→Fwd, Rev→Rev) with stroke width scaled by overlap length
-- Component-based node colouring and bidirectional highlighting on hover
-- Toggle to hide/show isolated nodes (hidden by default)
-- Contig assembly results table with per-contig FASTA download
+- Upload FASTA, adjust minimum overlap (1–64 bp) and assembly method in real time
+- Interactive SVG graph with pan, zoom, and node dragging
+- Edges colour-coded by kind with stroke width scaled by overlap length
+- Component-based node colouring with bidirectional highlighting on hover
+- Isolated nodes hidden by default (toggle to show)
+- Contig results table with per-contig FASTA download
 
 ## Dependencies
 
 ### CLI (`oligraph-rs`)
 
-- [rustc-hash](https://crates.io/crates/rustc-hash) — fast non-cryptographic hashing
-- [clap](https://crates.io/crates/clap) — command-line argument parsing
-- [indicatif](https://crates.io/crates/indicatif) — progress bars (optional, enabled by default)
+- [rustc-hash](https://crates.io/crates/rustc-hash): fast non-cryptographic hashing
+- [clap](https://crates.io/crates/clap): command-line argument parsing
+- [indicatif](https://crates.io/crates/indicatif): progress bars (optional, enabled by default)
 
 ### Web (`oligraph-web`)
 
-- [leptos](https://crates.io/crates/leptos) — reactive WASM UI framework
-- [web-sys](https://crates.io/crates/web-sys) / [gloo](https://crates.io/crates/gloo) — browser API bindings
+- [leptos](https://crates.io/crates/leptos): reactive WASM UI framework
+- [web-sys](https://crates.io/crates/web-sys) / [gloo](https://crates.io/crates/gloo): browser API bindings
 
 ## Licence
 
