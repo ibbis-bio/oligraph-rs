@@ -2,34 +2,26 @@
 
 A graph-based screening tool for large oligonucleotide orders. OliGraph discovers overlapping relationships between DNA sequences, builds a bi-directed overlap graph, and assembles overlapping oligos into contigs. Designed for validating PCA (Polymerase Cycling Assembly) designs and detecting unintended cross-annealing in oligo pools.
 
-## Installation
+Available as a CLI tool and a browser-based web app (all computation runs locally, no server required).
 
-Requires Rust (edition 2024).
-
-```sh
-cargo build --release
-```
-
-The binary is at `target/release/oligraph-rs`.
-
-## Usage
+## CLI usage
 
 ```
-oligraph-rs <input.fasta> [output.gfa] [-l <min_overlap>] [--assembly-method <all|pca>]
+oligraph-rs -i <input.fasta> -o <output_prefix> [-l <min_overlap>] [-m <all|pca>]
 ```
 
-| Argument | Description |
+| Flag | Description |
 |---|---|
-| `input.fasta` | Input FASTA file of oligonucleotide sequences |
-| `output.gfa` | Output file path (omit to write GFA to stdout) |
-| `-l <min>` | Minimum overlap length in bp (default: 20, max: 32) |
-| `--assembly-method` | `all` (default) keeps all edge types; `pca` keeps only 3'-3' annealing overlaps |
+| `-i, --input` | Input FASTA file of oligonucleotide sequences |
+| `-o, --output` | Output file prefix (writes `.gfa`, `.fasta`, `.contigs.fasta`) |
+| `-l, --min-overlap` | Minimum overlap length in bp (default: 20, range: 1–64) |
+| `-m, --method` | `all` (default) keeps all edge types; `pca` keeps only 3'-end annealing overlaps |
 
 ### Example
 
 ```sh
 # Screen an oligo pool, write overlap graph and assembled contigs
-oligraph-rs oligos.fasta results.gfa -l 20 --assembly-method pca
+oligraph-rs -i oligos.fasta -o results -l 20 -m pca
 ```
 
 This produces three files:
@@ -72,26 +64,51 @@ ACGTACGT...
 
 2. **Seed-and-extend overlap detection** — a rolling seed of length `l_min` indexes all sequence prefixes. Each suffix position is scanned against the index and verified base-by-base to find exact overlaps.
 
-3. **Bi-directed graph model** — each sequence is a node that can be traversed in forward or reverse-complement orientation. Edges connect suffix-to-prefix overlaps across four orientations (Types 1-3), following the BCALM2 bi-directed graph convention. Mirror-symmetric edges are canonicalized and deduplicated, keeping the longest overlap per pair.
+3. **Bi-directed graph model** — each sequence is a node that can be traversed in forward or reverse-complement orientation. Edges connect suffix-to-prefix overlaps across three effective orientations (Fwd→Fwd, Fwd→Rev, Rev→Fwd), following the BCALM2 bi-directed graph convention. Mirror-symmetric edges are canonicalised and deduplicated, keeping the longest overlap per pair.
 
-4. **Greedy contig assembly** — connected components are identified via union-find. Within each component, a bidirectional greedy walk extends from a start node, always choosing the neighbor with the longest overlap. The walk detects cyclic topology and counts branch points.
+4. **Greedy contig assembly** — connected components are identified via union-find. Within each component, a bidirectional greedy walk extends from a start node, always choosing the neighbour with the longest overlap. The walk detects cyclic topology and counts branch points.
 
 ### Edge types and PCA filtering
 
-| Type | From | To | Description |
-|---|---|---|---|
-| 1 | A+ | B+ | suffix(A) = prefix(B) |
-| 2 | A+ | B- | suffix(A) = prefix(revcomp(B)) |
-| 3 | A- | B+ | suffix(revcomp(A)) = prefix(B) |
+The overlap graph uses four edge kinds based on the strand orientations of the overlapping sequences:
 
-In `--assembly-method pca` mode, only Type 2 edges are retained. These correspond to 3'-end annealing — the physical mechanism of PCA — filtering out overlaps that would not participate in assembly.
+| Kind | From | To | Description |
+|---|---|---|---|
+| Fwd→Fwd | A+ | B+ | suffix(A) = prefix(B) |
+| Fwd→Rev | A+ | B− | suffix(A) = prefix(revcomp(B)) |
+| Rev→Fwd | A− | B+ | suffix(revcomp(A)) = prefix(B) |
+| Rev→Rev | A− | B− | suffix(revcomp(A)) = prefix(revcomp(B)) |
+
+In practice only the first three kinds are produced; Rev→Rev edges are excluded during overlap detection because they are mirror-symmetric with Fwd→Fwd.
+
+In `-m pca` mode, Fwd→Fwd edges are filtered out. The remaining edges (Fwd→Rev and Rev→Fwd) represent 3'-end annealing — the physical mechanism of PCA — so the graph retains only overlaps that participate in assembly.
+
+## Web app
+
+The Leptos/WASM frontend provides an interactive browser-based interface. All analysis runs locally in the browser — no data leaves the client.
+
+Features:
+
+- Upload a FASTA file and adjust minimum overlap length (1–64 bp) and assembly method in real time
+- Interactive SVG graph visualisation with drag-to-pan, scroll-to-zoom, and node dragging
+- Edge colour coding by kind (Fwd→Fwd, Fwd→Rev, Rev→Fwd, Rev→Rev) with stroke width scaled by overlap length
+- Component-based node colouring and bidirectional highlighting on hover
+- Toggle to hide/show isolated nodes (hidden by default)
+- Contig assembly results table with per-contig FASTA download
 
 ## Dependencies
 
-- [rustc-hash](https://crates.io/crates/rustc-hash) — fast non-cryptographic hashing
-- [rayon](https://crates.io/crates/rayon) — data parallelism (reserved for future use)
-- [indicatif](https://crates.io/crates/indicatif) — progress bars
+### CLI (`oligraph-rs`)
 
-## License
+- [rustc-hash](https://crates.io/crates/rustc-hash) — fast non-cryptographic hashing
+- [clap](https://crates.io/crates/clap) — command-line argument parsing
+- [indicatif](https://crates.io/crates/indicatif) — progress bars (optional, enabled by default)
+
+### Web (`oligraph-web`)
+
+- [leptos](https://crates.io/crates/leptos) — reactive WASM UI framework
+- [web-sys](https://crates.io/crates/web-sys) / [gloo](https://crates.io/crates/gloo) — browser API bindings
+
+## Licence
 
 TBD
