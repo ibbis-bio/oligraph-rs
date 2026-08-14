@@ -1,0 +1,114 @@
+name: Python
+
+on:
+  push:
+    branches: [main]
+    tags: ["py-v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test (${{ matrix.os }}, py${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python: ["3.9", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - uses: Swatinem/rust-cache@v2
+
+      # Writer parity tests: the labelled writers must match the core writers
+      # byte for byte. Linking the test binary needs a shared libpython, so point
+      # pyo3 at the interpreter setup-python just installed.
+      - name: cargo test
+        shell: bash
+        run: |
+          export PYO3_PYTHON="$(which python)"
+          LIBDIR="$(python -c 'import sysconfig; print(sysconfig.get_config_var("LIBDIR") or "")')"
+          export LD_LIBRARY_PATH="$LIBDIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+          export DYLD_LIBRARY_PATH="$LIBDIR${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
+          cargo test -p oligraph-py -p oligraph-rs
+
+      # Enables the CLI byte-for-byte parity test in the pytest suite.
+      - name: Build CLI
+        run: cargo build -p oligraph-rs --release
+
+      - name: Install
+        run: python -m pip install --upgrade pip && python -m pip install ".[test]"
+
+      - name: pytest
+        run: python -m pytest tests -q
+
+  wheels:
+    name: wheel (${{ matrix.platform.os }}, ${{ matrix.platform.target }})
+    runs-on: ${{ matrix.platform.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - { os: ubuntu-latest, target: x86_64, manylinux: "2_28" }
+          - { os: ubuntu-latest, target: aarch64, manylinux: "2_28" }
+          - { os: macos-13, target: x86_64 }
+          - { os: macos-latest, target: aarch64 }
+          - { os: windows-latest, target: x64 }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      # abi3-py39 means one wheel per platform covers every Python from 3.9 up.
+      - uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.platform.target }}
+          args: --release --out dist
+          sccache: "true"
+          manylinux: ${{ matrix.platform.manylinux || 'auto' }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheel-${{ matrix.platform.os }}-${{ matrix.platform.target }}
+          path: dist
+
+  sdist:
+    name: sdist
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: PyO3/maturin-action@v1
+        with:
+          command: sdist
+          args: --out dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdist
+          path: dist
+
+  # Wheels go to the GitHub Release for the tag; nothing is published to PyPI.
+  release:
+    name: attach wheels to release
+    if: startsWith(github.ref, 'refs/tags/py-v')
+    needs: [test, wheels, sdist]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - run: ls -la dist
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true

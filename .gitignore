@@ -2,6 +2,21 @@
 web/dist/
 output.*
 data/
+# Test fixtures are checked in; `data/` above would otherwise swallow them.
+!tests/data/
 docs/superpowers/
 .ipynb_checkpoints/
 CLAUDE.md
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+dist/
+*.whl
+*.egg-info/
+# Compiled extension, built in place by `pip install -e .`
+python/oligraph/*.so
+python/oligraph/*.pyd
+python/oligraph/*.dylib

@@ -1,3 +1,5 @@
+use std::fmt;
+
 use rustc_hash::FxHashMap;
 
 // ============================================================
@@ -41,17 +43,28 @@ pub struct Packed<const LIMBS: usize> {
 }
 
 impl<const LIMBS: usize> Packed<LIMBS> {
-    fn from_bytes(seq: &[u8]) -> Option<Self> {
-        assert!(seq.len() <= 32 * LIMBS);
+    /// Longest sequence these limbs can hold: 32 bases per `u64` at 2 bits each.
+    pub const CAPACITY: usize = 32 * LIMBS;
+
+    fn from_bytes(seq: &[u8]) -> Result<Self, SequenceError> {
+        if seq.len() > Self::CAPACITY {
+            return Err(SequenceError::TooLong {
+                len: seq.len(),
+                capacity: Self::CAPACITY,
+            });
+        }
         let mut limbs = [0u64; LIMBS];
         for (i, &b) in seq.iter().enumerate() {
             let n = nuc_to_2bit(b);
             if n == NUC_BAD {
-                return None;
+                return Err(SequenceError::InvalidBase {
+                    position: i,
+                    base: b,
+                });
             }
             limbs[i / 32] |= (n as u64) << ((i % 32) * 2);
         }
-        Some(Packed {
+        Ok(Packed {
             limbs,
             len: seq.len() as u32,
         })
@@ -105,6 +118,123 @@ impl<const LIMBS: usize> Packed<LIMBS> {
 }
 
 // ============================================================
+// Errors
+// ============================================================
+
+/// Smallest permitted `l_min`.
+pub const MIN_OVERLAP: u32 = 1;
+
+/// Largest permitted `l_min`: the seed key is packed into a `u128` at 2 bits per
+/// base, so 64 bases fill it exactly.
+pub const MAX_OVERLAP: u32 = 64;
+
+/// Why a single sequence cannot be packed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SequenceError {
+    /// A byte that is not `A`, `C`, `G` or `T` (in either case). `N` and other
+    /// IUPAC ambiguity codes are not accepted.
+    InvalidBase { position: usize, base: u8 },
+    /// Longer than the 2-bit packing holds. Raising the `LIMBS` parameter buys
+    /// 32 more bases per limb.
+    TooLong { len: usize, capacity: usize },
+}
+
+impl fmt::Display for SequenceError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            SequenceError::InvalidBase { position, base } => write!(
+                f,
+                "non-ACGT base {:?} at position {}",
+                *base as char, position
+            ),
+            SequenceError::TooLong { len, capacity } => write!(
+                f,
+                "sequence is {len} bases, but the packing holds at most {capacity}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for SequenceError {}
+
+/// Why an overlap graph or contig set could not be built.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Error {
+    /// `l_min` outside [`MIN_OVERLAP`]..=[`MAX_OVERLAP`].
+    MinOverlapOutOfRange { min_overlap: u32 },
+    /// The sequence at `index` in the input slice cannot be used.
+    Sequence {
+        index: usize,
+        source: SequenceError,
+    },
+    /// An edge names sequence `id`, but only `n_seqs` sequences were supplied.
+    /// Only reachable by passing hand-built edges; those from
+    /// [`build_overlap_graph`] are always in range.
+    EdgeOutOfRange { id: u32, n_seqs: usize },
+}
+
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Error::MinOverlapOutOfRange { min_overlap } => write!(
+                f,
+                "min_overlap {min_overlap} is out of range: must be between \
+                 {MIN_OVERLAP} and {MAX_OVERLAP}"
+            ),
+            Error::Sequence { index, source } => {
+                write!(f, "sequence at index {index}: {source}")
+            }
+            Error::EdgeOutOfRange { id, n_seqs } => write!(
+                f,
+                "edge names sequence {id}, but only {n_seqs} sequences were given"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for Error {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Error::Sequence { source, .. } => Some(source),
+            _ => None,
+        }
+    }
+}
+
+/// Check that `seq` can be packed at this `LIMBS`: `ACGT` only, and no longer
+/// than `32 * LIMBS` bases.
+///
+/// [`build_overlap_graph`] applies this to every input already. Call it directly
+/// only when you want to inspect or filter records yourself — for instance to
+/// drop the bad ones and carry on, which the graph builder will not do for you.
+pub fn validate_sequence<const LIMBS: usize>(seq: &[u8]) -> Result<(), SequenceError> {
+    if seq.len() > Packed::<LIMBS>::CAPACITY {
+        return Err(SequenceError::TooLong {
+            len: seq.len(),
+            capacity: Packed::<LIMBS>::CAPACITY,
+        });
+    }
+    match seq.iter().position(|&b| nuc_to_2bit(b) == NUC_BAD) {
+        Some(position) => Err(SequenceError::InvalidBase {
+            position,
+            base: seq[position],
+        }),
+        None => Ok(()),
+    }
+}
+
+/// Check that `min_overlap` is in [`MIN_OVERLAP`]..=[`MAX_OVERLAP`].
+///
+/// [`build_overlap_graph`] applies this already; call it directly to reject a
+/// bad argument before doing the work of assembling its inputs.
+pub fn validate_min_overlap(min_overlap: u32) -> Result<(), Error> {
+    if !(MIN_OVERLAP..=MAX_OVERLAP).contains(&min_overlap) {
+        return Err(Error::MinOverlapOutOfRange { min_overlap });
+    }
+    Ok(())
+}
+
+// ============================================================
 // Edge type and strand
 // ============================================================
 
@@ -143,6 +273,7 @@ pub enum Topology {
     Cyclic,
 }
 
+#[derive(Debug, Clone)]
 pub struct Contig {
     pub sequence: Vec<u8>,
     pub component: usize,
@@ -213,11 +344,8 @@ pub fn build_overlap_graph<const LIMBS: usize>(
     seqs: &[&[u8]],
     l_min: u32,
     assembly_method: AssemblyMethod,
-) -> Vec<Edge> {
-    assert!(
-        (1..=64).contains(&l_min),
-        "l_min must fit in a u128 seed (<=64)"
-    );
+) -> Result<Vec<Edge>, Error> {
+    validate_min_overlap(l_min)?;
 
     let n_seqs = seqs.len();
 
@@ -227,8 +355,9 @@ pub fn build_overlap_graph<const LIMBS: usize>(
     // ---- 1. Pack forward + RC ---------------------------------------------
     // packed[0..n_seqs]: forward strands, packed[n_seqs..2*n_seqs]: RC (for verification)
     let mut packed: Vec<Packed<LIMBS>> = Vec::with_capacity(2 * n_seqs);
-    for s in seqs {
-        let p = Packed::<LIMBS>::from_bytes(s).expect("non-ACGT base");
+    for (index, s) in seqs.iter().enumerate() {
+        let p = Packed::<LIMBS>::from_bytes(s)
+            .map_err(|source| Error::Sequence { index, source })?;
         packed.push(p);
     }
     for i in 0..n_seqs {
@@ -410,7 +539,20 @@ pub fn build_overlap_graph<const LIMBS: usize>(
     #[cfg(not(feature = "progress"))]
     let _ = raw_count;
 
-    deduped
+    Ok(deduped)
+}
+
+/// Reject edges naming a sequence that was not supplied, which would otherwise
+/// index out of bounds during assembly or output.
+fn check_edge_range(edges: &[Edge], n_seqs: usize) -> Result<(), Error> {
+    for e in edges {
+        for id in [e.from_id, e.to_id] {
+            if id as usize >= n_seqs {
+                return Err(Error::EdgeOutOfRange { id, n_seqs });
+            }
+        }
+    }
+    Ok(())
 }
 
 fn canonicalize_and_dedup(edges: Vec<Edge>) -> Vec<Edge> {
@@ -442,18 +584,25 @@ fn canonicalize_and_dedup(edges: Vec<Edge>) -> Vec<Edge> {
 // Output writers
 // ============================================================
 
+/// The writers return `io::Result`, so a bad-input error travels as an
+/// `InvalidInput` error with the [`Error`] preserved as its source.
+fn invalid_input(e: Error) -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::InvalidInput, e)
+}
+
 pub fn write_gfa<W: std::io::Write>(
     seqs: &[&[u8]],
     edges: &[Edge],
     mut w: W,
     assembly_method: AssemblyMethod,
 ) -> std::io::Result<()> {
+    check_edge_range(edges, seqs.len()).map_err(invalid_input)?;
     match assembly_method {
         AssemblyMethod::All => writeln!(w, "H\tVN:Z:1.0")?,
         AssemblyMethod::Pca => writeln!(w, "H\tVN:Z:1.0\tam:Z:pca")?,
     }
     for (i, s) in seqs.iter().enumerate() {
-        writeln!(w, "S\t{}\t{}", i, std::str::from_utf8(s).unwrap())?;
+        writeln!(w, "S\t{}\t{}", i, String::from_utf8_lossy(s))?;
     }
     for e in edges {
         let f = match e.from_strand {
@@ -478,6 +627,7 @@ pub fn write_fasta<W: std::io::Write>(
     edges: &[Edge],
     mut w: W,
 ) -> std::io::Result<()> {
+    check_edge_range(edges, seqs.len()).map_err(invalid_input)?;
     let mut edges_by_from: Vec<Vec<&Edge>> = vec![Vec::new(); seqs.len()];
     for e in edges {
         edges_by_from[e.from_id as usize].push(e);
@@ -496,7 +646,7 @@ pub fn write_fasta<W: std::io::Write>(
             write!(w, " L:{}:{}:{}", f, e.to_id, t)?;
         }
         writeln!(w)?;
-        writeln!(w, "{}", std::str::from_utf8(s).unwrap())?;
+        writeln!(w, "{}", String::from_utf8_lossy(s))?;
     }
     Ok(())
 }
@@ -690,11 +840,12 @@ fn stitch(path: &[(u32, Strand)], overlaps: &[u32], seqs: &[&[u8]]) -> Vec<u8> {
     buf
 }
 
-pub fn assemble_contigs(seqs: &[&[u8]], edges: &[Edge]) -> Vec<Contig> {
+pub fn assemble_contigs(seqs: &[&[u8]], edges: &[Edge]) -> Result<Vec<Contig>, Error> {
     let n = seqs.len();
     if n == 0 || edges.is_empty() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
+    check_edge_range(edges, n)?;
 
     let mut adj: Vec<Vec<(u32, Strand, u32)>> = vec![Vec::new(); n * 2];
     for e in edges {
@@ -765,7 +916,7 @@ pub fn assemble_contigs(seqs: &[&[u8]], edges: &[Edge]) -> Vec<Contig> {
             .then(a.component.cmp(&b.component))
     });
 
-    contigs
+    Ok(contigs)
 }
 
 pub fn write_contigs_fasta<W: std::io::Write>(contigs: &[Contig], mut w: W) -> std::io::Result<()> {
@@ -797,7 +948,7 @@ pub fn write_contigs_fasta<W: std::io::Write>(contigs: &[Contig], mut w: W) -> s
             c.branches,
             path_str,
         )?;
-        writeln!(w, "{}", std::str::from_utf8(&c.sequence).unwrap())?;
+        writeln!(w, "{}", String::from_utf8_lossy(&c.sequence))?;
     }
     Ok(())
 }
@@ -847,7 +998,7 @@ mod tests {
     fn fwd_fwd_overlap() {
         let s0: &[u8] = b"ACGTACGTACGT";
         let s1: &[u8] = b"ACGTACGTGGGGGG";
-        let edges = build_overlap_graph::<1>(&[s0, s1], 6, AssemblyMethod::All);
+        let edges = build_overlap_graph::<1>(&[s0, s1], 6, AssemblyMethod::All).unwrap();
         assert!(edges.iter().any(|e| e.from_id == 0
             && e.to_id == 1
             && e.from_strand == Strand::Fwd
@@ -859,7 +1010,7 @@ mod tests {
     fn no_internal_substring_match() {
         let s0: &[u8] = b"ACGTACGT";
         let s1: &[u8] = b"GGGGACGTACGTGGGG";
-        let edges = build_overlap_graph::<1>(&[s0, s1], 6, AssemblyMethod::All);
+        let edges = build_overlap_graph::<1>(&[s0, s1], 6, AssemblyMethod::All).unwrap();
         assert!(
             !edges
                 .iter()
@@ -871,7 +1022,7 @@ mod tests {
     fn fwd_rev_overlap() {
         let s0: &[u8] = b"AACCGGTTAACCGG";
         let s1: &[u8] = b"GGGGGGCCGGTTAA";
-        let edges = build_overlap_graph::<1>(&[s0, s1], 6, AssemblyMethod::All);
+        let edges = build_overlap_graph::<1>(&[s0, s1], 6, AssemblyMethod::All).unwrap();
         assert!(
             edges.iter().any(|e| e.from_id == 0
                 && e.to_id == 1
@@ -948,7 +1099,7 @@ mod tests {
         // 50bp sequences with 40bp overlap, l_min=35 requires u128 seeds (70 bits)
         let s0: &[u8] = b"TTTTTTTTTTACGTCGATCGATCGATCGATCGATCGATCGATCGATCGAT";
         let s1: &[u8] = b"ACGTCGATCGATCGATCGATCGATCGATCGATCGATCGATGGGGGGGGGG";
-        let edges = build_overlap_graph::<2>(&[s0, s1], 35, AssemblyMethod::All);
+        let edges = build_overlap_graph::<2>(&[s0, s1], 35, AssemblyMethod::All).unwrap();
         assert!(
             edges.iter().any(|e| e.from_id == 0
                 && e.to_id == 1
@@ -964,7 +1115,7 @@ mod tests {
     fn rev_fwd_overlap() {
         let a: &[u8] = b"AACCGGTTTT";
         let b: &[u8] = b"CCGGTTGGGG";
-        let edges = build_overlap_graph::<1>(&[a, b], 6, AssemblyMethod::All);
+        let edges = build_overlap_graph::<1>(&[a, b], 6, AssemblyMethod::All).unwrap();
         assert!(
             edges.iter().any(|e| {
                 (e.from_id == 0
@@ -986,7 +1137,7 @@ mod tests {
     #[test]
     fn self_overlap_tandem_repeat() {
         let s: &[u8] = b"ACGTACGTACGT";
-        let edges = build_overlap_graph::<1>(&[s], 4, AssemblyMethod::All);
+        let edges = build_overlap_graph::<1>(&[s], 4, AssemblyMethod::All).unwrap();
         assert!(
             edges
                 .iter()
@@ -1006,7 +1157,7 @@ mod tests {
     #[test]
     fn self_rc_overlap() {
         let s: &[u8] = b"AACCAACCGGTT";
-        let edges = build_overlap_graph::<1>(&[s], 6, AssemblyMethod::All);
+        let edges = build_overlap_graph::<1>(&[s], 6, AssemblyMethod::All).unwrap();
         assert!(
             edges.iter().any(|e| e.from_id == 0
                 && e.to_id == 0
@@ -1023,7 +1174,7 @@ mod tests {
         let s0: &[u8] = b"ACGTACGTCCCC";
         let s1: &[u8] = b"ACGTCCCCGGGG";
         let s2: &[u8] = b"CCCCGGGGACGT";
-        let edges = build_overlap_graph::<1>(&[s0, s1, s2], 4, AssemblyMethod::All);
+        let edges = build_overlap_graph::<1>(&[s0, s1, s2], 4, AssemblyMethod::All).unwrap();
 
         let has_edge = |from: u32, fs: Strand, to: u32, ts: Strand, ov: u32| -> bool {
             edges.iter().any(|e| {
@@ -1066,7 +1217,7 @@ mod tests {
     fn pca_drops_fwd_fwd_overlap() {
         let s0: &[u8] = b"ACGTACGTACGT";
         let s1: &[u8] = b"ACGTACGTGGGGGG";
-        let edges = build_overlap_graph::<1>(&[s0, s1], 6, AssemblyMethod::Pca);
+        let edges = build_overlap_graph::<1>(&[s0, s1], 6, AssemblyMethod::Pca).unwrap();
         assert!(
             !edges
                 .iter()
@@ -1080,7 +1231,7 @@ mod tests {
     fn pca_keeps_fwd_rev_overlap() {
         let s0: &[u8] = b"AACCGGTTAACCGG";
         let s1: &[u8] = b"GGGGGGCCGGTTAA";
-        let edges = build_overlap_graph::<1>(&[s0, s1], 6, AssemblyMethod::Pca);
+        let edges = build_overlap_graph::<1>(&[s0, s1], 6, AssemblyMethod::Pca).unwrap();
         assert!(
             edges.iter().any(|e| e.from_id == 0
                 && e.to_id == 1
@@ -1096,7 +1247,7 @@ mod tests {
     fn pca_keeps_rev_fwd_overlap() {
         let a: &[u8] = b"AACCGGTTTT";
         let b: &[u8] = b"CCGGTTGGGG";
-        let edges = build_overlap_graph::<1>(&[a, b], 6, AssemblyMethod::Pca);
+        let edges = build_overlap_graph::<1>(&[a, b], 6, AssemblyMethod::Pca).unwrap();
         assert!(
             edges.iter().any(|e| {
                 (e.from_id == 0
@@ -1177,8 +1328,8 @@ mod tests {
         let s0: &[u8] = b"ACGTACGTCCCCCC";
         let s1: &[u8] = b"CCCCCCGGGGGGGG";
         let s2: &[u8] = b"TTTTTTTTTTTTTT";
-        let edges = build_overlap_graph::<1>(&[s0, s1, s2], 6, AssemblyMethod::All);
-        let contigs = assemble_contigs(&[s0, s1, s2], &edges);
+        let edges = build_overlap_graph::<1>(&[s0, s1, s2], 6, AssemblyMethod::All).unwrap();
+        let contigs = assemble_contigs(&[s0, s1, s2], &edges).unwrap();
         for c in &contigs {
             assert!(
                 !c.path.iter().any(|&(id, _)| id == 2),
@@ -1205,8 +1356,8 @@ mod tests {
     fn contig_single_edge_stitch() {
         let s0: &[u8] = b"ACGTACGTCCCCCC";
         let s1: &[u8] = b"CCCCCCGGGGGGGG";
-        let edges = build_overlap_graph::<1>(&[s0, s1], 6, AssemblyMethod::All);
-        let contigs = assemble_contigs(&[s0, s1], &edges);
+        let edges = build_overlap_graph::<1>(&[s0, s1], 6, AssemblyMethod::All).unwrap();
+        let contigs = assemble_contigs(&[s0, s1], &edges).unwrap();
         assert_eq!(contigs.len(), 1);
         let c = &contigs[0];
         assert_eq!(c.path.len(), 2);
@@ -1225,8 +1376,8 @@ mod tests {
         let a: &[u8] = b"AACCGGTTAACCGG";
         let b: &[u8] = b"TTTTTTCCGGTTAA";
         let c: &[u8] = b"AAAAAACCCCCCCC";
-        let edges = build_overlap_graph::<1>(&[a, b, c], 6, AssemblyMethod::All);
-        let contigs = assemble_contigs(&[a, b, c], &edges);
+        let edges = build_overlap_graph::<1>(&[a, b, c], 6, AssemblyMethod::All).unwrap();
+        let contigs = assemble_contigs(&[a, b, c], &edges).unwrap();
         let full_chain = contigs.iter().find(|ct| ct.path.len() >= 3);
         assert!(
             full_chain.is_some()
@@ -1255,8 +1406,8 @@ mod tests {
         let b: &[u8] = b"CCCCCCCCCTTTTTTTT";
         let c: &[u8] = b"CCCCCCGGGGGGGGGGGG";
         let seqs: &[&[u8]] = &[a, b, c];
-        let edges = build_overlap_graph::<1>(seqs, 6, AssemblyMethod::All);
-        let contigs = assemble_contigs(seqs, &edges);
+        let edges = build_overlap_graph::<1>(seqs, 6, AssemblyMethod::All).unwrap();
+        let contigs = assemble_contigs(seqs, &edges).unwrap();
         let longest = &contigs[0];
         assert!(
             longest.path.iter().any(|&(id, _)| id == 0),
@@ -1276,8 +1427,8 @@ mod tests {
         let b: &[u8] = b"CCCCCCTTTTTT";
         let c: &[u8] = b"CCCCCCAAAAAA";
         let seqs: &[&[u8]] = &[a, b, c];
-        let edges = build_overlap_graph::<1>(seqs, 6, AssemblyMethod::All);
-        let contigs = assemble_contigs(seqs, &edges);
+        let edges = build_overlap_graph::<1>(seqs, 6, AssemblyMethod::All).unwrap();
+        let contigs = assemble_contigs(seqs, &edges).unwrap();
         let first = &contigs[0];
         let ids: Vec<u32> = first.path.iter().map(|&(id, _)| id).collect();
         assert!(
@@ -1290,7 +1441,7 @@ mod tests {
     #[test]
     fn contig_empty_graph() {
         let s0: &[u8] = b"ACGTACGT";
-        let contigs = assemble_contigs(&[s0], &[]);
+        let contigs = assemble_contigs(&[s0], &[]).unwrap();
         assert!(contigs.is_empty());
     }
 
@@ -1300,8 +1451,8 @@ mod tests {
         let b: &[u8] = b"CCCCCCCCTTTT";
         let c: &[u8] = b"TTTTGGGGGGGG";
         let seqs: &[&[u8]] = &[a, b, c];
-        let edges = build_overlap_graph::<1>(seqs, 4, AssemblyMethod::All);
-        let contigs = assemble_contigs(seqs, &edges);
+        let edges = build_overlap_graph::<1>(seqs, 4, AssemblyMethod::All).unwrap();
+        let contigs = assemble_contigs(seqs, &edges).unwrap();
         assert_eq!(
             contigs.len(),
             1,
@@ -1325,8 +1476,8 @@ mod tests {
         let s4: &[u8] = b"CACACACACGTGT";
         let s5: &[u8] = b"AGTCAGTCAGTC";
         let seqs: &[&[u8]] = &[s0, s1, s2, s3, s4, s5];
-        let edges = build_overlap_graph::<1>(seqs, 6, AssemblyMethod::All);
-        let contigs = assemble_contigs(seqs, &edges);
+        let edges = build_overlap_graph::<1>(seqs, 6, AssemblyMethod::All).unwrap();
+        let contigs = assemble_contigs(seqs, &edges).unwrap();
         assert!(
             contigs.len() >= 2,
             "expected at least 2 contigs from 2 components"
@@ -1382,8 +1533,8 @@ mod tests {
     #[test]
     fn contig_self_overlap_no_infinite_loop() {
         let s: &[u8] = b"ACGTACGTACGT";
-        let edges = build_overlap_graph::<1>(&[s], 4, AssemblyMethod::All);
-        let contigs = assemble_contigs(&[s], &edges);
+        let edges = build_overlap_graph::<1>(&[s], 4, AssemblyMethod::All).unwrap();
+        let contigs = assemble_contigs(&[s], &edges).unwrap();
         assert!(contigs.len() <= 1);
         if !contigs.is_empty() {
             assert_eq!(
@@ -1417,5 +1568,143 @@ mod tests {
         let content = ">a\nacgt\n";
         let (seqs, _) = parse_fasta_str(content);
         assert_eq!(seqs[0], b"ACGT");
+    }
+
+    // ============================================================
+    // Errors
+    // ============================================================
+
+    #[test]
+    fn min_overlap_out_of_range_is_an_error() {
+        let s: &[u8] = b"ACGTACGTACGT";
+        for bad in [0, MAX_OVERLAP + 1, 1000] {
+            assert_eq!(
+                build_overlap_graph::<1>(&[s], bad, AssemblyMethod::All).unwrap_err(),
+                Error::MinOverlapOutOfRange { min_overlap: bad }
+            );
+        }
+        assert!(build_overlap_graph::<1>(&[s], MIN_OVERLAP, AssemblyMethod::All).is_ok());
+        assert!(validate_min_overlap(MAX_OVERLAP).is_ok());
+    }
+
+    #[test]
+    fn non_acgt_base_reports_index_and_position() {
+        let good: &[u8] = b"ACGTACGTACGT";
+        let bad: &[u8] = b"ACGTNNNNACGT";
+        assert_eq!(
+            build_overlap_graph::<1>(&[good, bad], 6, AssemblyMethod::All).unwrap_err(),
+            Error::Sequence {
+                index: 1,
+                source: SequenceError::InvalidBase {
+                    position: 4,
+                    base: b'N'
+                },
+            }
+        );
+    }
+
+    #[test]
+    fn over_capacity_sequence_reports_length() {
+        // Packed::<1> holds 32 bases; give it 33.
+        let long = vec![b'A'; 33];
+        let err = build_overlap_graph::<1>(&[&long], 6, AssemblyMethod::All).unwrap_err();
+        assert_eq!(
+            err,
+            Error::Sequence {
+                index: 0,
+                source: SequenceError::TooLong {
+                    len: 33,
+                    capacity: 32
+                },
+            }
+        );
+    }
+
+    #[test]
+    fn lowercase_bases_are_accepted() {
+        assert!(validate_sequence::<1>(b"acgtACGT").is_ok());
+        assert_eq!(
+            validate_sequence::<1>(b"ACGU"),
+            Err(SequenceError::InvalidBase {
+                position: 3,
+                base: b'U'
+            })
+        );
+    }
+
+    #[test]
+    fn validate_sequence_agrees_with_build_overlap_graph() {
+        // The binding layer filters records with validate_sequence and then hands
+        // the survivors to build_overlap_graph, so the two must never disagree.
+        let cases: [&[u8]; 5] = [b"ACGT", b"acgt", b"ACNT", b"", b"ACGTACGTACGTACGT"];
+        for seq in cases {
+            let valid = validate_sequence::<1>(seq).is_ok();
+            let built = build_overlap_graph::<1>(&[seq], 1, AssemblyMethod::All).is_ok();
+            assert_eq!(valid, built, "disagreement on {:?}", seq);
+        }
+    }
+
+    #[test]
+    fn edges_naming_missing_sequences_are_rejected() {
+        let s: &[u8] = b"ACGTACGTACGT";
+        let rogue = [Edge {
+            from_id: 0,
+            from_strand: Strand::Fwd,
+            to_id: 7,
+            to_strand: Strand::Fwd,
+            overlap_len: 4,
+        }];
+
+        assert_eq!(
+            assemble_contigs(&[s], &rogue).unwrap_err(),
+            Error::EdgeOutOfRange { id: 7, n_seqs: 1 }
+        );
+
+        // The writers surface the same problem as an io::Error rather than panicking.
+        let mut buf = Vec::new();
+        let err = write_gfa(&[s], &rogue, &mut buf, AssemblyMethod::All).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+
+        let mut buf = Vec::new();
+        let err = write_fasta(&[s], &rogue, &mut buf).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn error_messages_name_the_problem() {
+        let e = Error::Sequence {
+            index: 3,
+            source: SequenceError::InvalidBase {
+                position: 4,
+                base: b'N',
+            },
+        };
+        assert_eq!(
+            e.to_string(),
+            "sequence at index 3: non-ACGT base 'N' at position 4"
+        );
+        assert_eq!(
+            Error::MinOverlapOutOfRange { min_overlap: 0 }.to_string(),
+            "min_overlap 0 is out of range: must be between 1 and 64"
+        );
+        assert_eq!(
+            SequenceError::TooLong {
+                len: 400,
+                capacity: 320
+            }
+            .to_string(),
+            "sequence is 400 bases, but the packing holds at most 320"
+        );
+        // The failing sequence is reachable through the error chain.
+        assert!(std::error::Error::source(&e).is_some());
+    }
+
+    #[test]
+    fn writers_do_not_panic_on_non_utf8_bytes() {
+        // Reachable only by calling the writers directly with unvalidated bytes.
+        let raw: &[u8] = &[0xFF, 0xFE];
+        let mut buf = Vec::new();
+        write_gfa(&[raw], &[], &mut buf, AssemblyMethod::All).unwrap();
+        assert!(String::from_utf8(buf).unwrap().contains("S\t0\t"));
     }
 }

@@ -56,13 +56,6 @@ fn analyse_stats(
         return Err("No valid sequences found in FASTA".into());
     }
     let max_len = seqs.iter().map(|s| s.len()).max().unwrap();
-    if max_len > LIMBS * 32 {
-        return Err(format!(
-            "Sequence length {} exceeds capacity (max {}bp).",
-            max_len,
-            LIMBS * 32
-        ));
-    }
     let min_len = seqs.iter().map(|s| s.len()).min().unwrap();
     if (l_min as usize) > min_len {
         return Err(format!(
@@ -72,8 +65,9 @@ fn analyse_stats(
     }
 
     let seq_refs: Vec<&[u8]> = seqs.iter().map(|s| s.as_slice()).collect();
-    let edges = build_overlap_graph::<LIMBS>(&seq_refs, l_min, method);
-    let contigs = assemble_contigs(&seq_refs, &edges);
+    let edges =
+        build_overlap_graph::<LIMBS>(&seq_refs, l_min, method).map_err(|e| e.to_string())?;
+    let contigs = assemble_contigs(&seq_refs, &edges).map_err(|e| e.to_string())?;
 
     let mut has_edge = vec![false; seqs.len()];
     for e in &edges {
