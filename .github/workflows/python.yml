@@ -94,11 +94,52 @@ jobs:
           name: sdist
           path: dist
 
-  # Wheels go to the GitHub Release for the tag; nothing is published to PyPI.
+  # A PyPI version can never be replaced, so refuse to publish when the tag and
+  # the package version disagree.
+  check-version:
+    name: tag matches package version
+    if: startsWith(github.ref, 'refs/tags/py-v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compare tag with python/Cargo.toml
+        run: |
+          tag="${GITHUB_REF_NAME#py-v}"
+          pkg=$(grep -m1 '^version = ' python/Cargo.toml | cut -d'"' -f2)
+          echo "tag=$tag package=$pkg"
+          if [ "$tag" != "$pkg" ]; then
+            echo "::error::tag py-v$tag does not match version $pkg in python/Cargo.toml"
+            exit 1
+          fi
+
+  # Trusted Publishing (OIDC): no API token is stored anywhere. The `pypi`
+  # environment is where a required-reviewer rule can gate the upload.
+  pypi:
+    name: publish to PyPI
+    if: startsWith(github.ref, 'refs/tags/py-v')
+    needs: [check-version, test, wheels, sdist]
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/oligraph
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - run: ls -la dist
+      - name: Validate metadata before upload
+        run: pipx run twine check dist/*
+      - uses: pypa/gh-action-pypi-publish@release/v1
+
+  # Same artefacts also attached to the GitHub Release, so a wheel stays
+  # installable by URL without going through PyPI.
   release:
     name: attach wheels to release
     if: startsWith(github.ref, 'refs/tags/py-v')
-    needs: [test, wheels, sdist]
+    needs: [check-version, test, wheels, sdist]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -107,7 +148,6 @@ jobs:
         with:
           path: dist
           merge-multiple: true
-      - run: ls -la dist
       - uses: softprops/action-gh-release@v2
         with:
           files: dist/*

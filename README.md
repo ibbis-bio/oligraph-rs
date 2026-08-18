@@ -62,19 +62,17 @@ ACGTACGT...
 
 ### Install
 
-Prebuilt wheels are attached to each `py-v*` [release](https://github.com/AgentK9/oligraph-rs/releases). They need no Rust toolchain and cover Python 3.9+ on Linux, macOS and Windows:
-
 ```sh
-pip install oligraph --find-links https://github.com/AgentK9/oligraph-rs/releases/expanded_assets/py-v0.1.0
+pip install oligraph
 ```
+
+Wheels cover Python 3.9+ on Linux, macOS and Windows and need no Rust toolchain. The same wheels are attached to each `py-v*` [release](https://github.com/AgentK9/oligraph-rs/releases), so a specific build can also be installed by URL.
 
 To build from source instead (needs Rust 1.85 or later):
 
 ```sh
 pip install git+https://github.com/AgentK9/oligraph-rs
 ```
-
-The package is not published to PyPI.
 
 ### Quick start
 
@@ -219,4 +217,4 @@ The Leptos/WASM frontend runs entirely in the browser. No data leaves the client
 
 ## Licence
 
-TBD
+[MIT](LICENSE).

@@ -1138,7 +1138,7 @@ dependencies = [
 
 [[package]]
 name = "oligraph-py"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "needletail",
  "oligraph-rs",
@@ -1147,7 +1147,7 @@ dependencies = [
 
 [[package]]
 name = "oligraph-rs"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "clap",
  "indicatif",
