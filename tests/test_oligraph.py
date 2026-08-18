@@ -209,6 +209,20 @@ def test_gzip_fastq_and_multiline_agree_with_plain_fasta(tmp_path):
         assert g.to_gfa() == baseline.to_gfa(), label
 
 
+def test_crlf_line_endings(tmp_path):
+    """A FASTA saved on Windows has \r\n; the \r must not read as a base."""
+    crlf = tmp_path / "crlf.fasta"
+    crlf.write_bytes(POOL_FASTA.read_text().replace("\n", "\r\n").encode())
+
+    g = oligraph.build_from_fasta(crlf, min_overlap=20)
+    baseline = oligraph.build_from_fasta(POOL_FASTA, min_overlap=20)
+
+    assert g.skipped == []
+    assert g.ids == baseline.ids
+    assert g.sequences == baseline.sequences
+    assert g.to_gfa() == baseline.to_gfa()
+
+
 def test_missing_file_raises_filenotfound(tmp_path):
     with pytest.raises(FileNotFoundError):
         oligraph.build_from_fasta(tmp_path / "nope.fasta")
@@ -499,8 +513,9 @@ def test_write_methods_match_string_methods(tmp_path, render, write, stem):
 
 
 def _cli_binary() -> Path | None:
+    exe = ".exe" if sys.platform == "win32" else ""
     for profile in ("release", "debug"):
-        candidate = REPO_ROOT / "target" / profile / "oligraph-rs"
+        candidate = REPO_ROOT / "target" / profile / f"oligraph-rs{exe}"
         if candidate.exists():
             return candidate
     found = shutil.which("oligraph-rs")
