@@ -4,8 +4,8 @@ use std::path::{Path, PathBuf};
 
 use clap::Parser;
 use oligraph_rs::{
-    AssemblyMethod, LIMBS, assemble_contigs, build_overlap_graph, parse_fasta_str,
-    write_contigs_fasta, write_fasta, write_gfa,
+    AssemblyMethod, Error, LIMBS, SequenceError, assemble_contigs, build_overlap_graph,
+    parse_fasta_str, write_contigs_fasta, write_fasta, write_gfa,
 };
 
 #[derive(clap::ValueEnum, Clone, Copy)]
@@ -70,16 +70,6 @@ fn main() {
     }
 
     let max_len = seqs.iter().map(|s| s.len()).max().unwrap();
-    if max_len > LIMBS * 32 {
-        eprintln!(
-            "error: sequence length {} exceeds capacity of LIMBS={} (max {}bp). Recompile with larger LIMBS.",
-            max_len,
-            LIMBS,
-            LIMBS * 32
-        );
-        std::process::exit(1);
-    }
-
     let l_min = cli.min_overlap;
     let assembly_method = AssemblyMethod::from(cli.method);
 
@@ -92,7 +82,21 @@ fn main() {
     );
 
     let seq_refs: Vec<&[u8]> = seqs.iter().map(|s| s.as_slice()).collect();
-    let edges = build_overlap_graph::<LIMBS>(&seq_refs, l_min, assembly_method);
+    let edges = build_overlap_graph::<LIMBS>(&seq_refs, l_min, assembly_method)
+        .unwrap_or_else(|e| {
+            eprintln!("error: {e}");
+            if let Error::Sequence {
+                source: SequenceError::TooLong { .. },
+                ..
+            } = e
+            {
+                eprintln!(
+                    "hint: recompile with a larger LIMBS to raise the {}bp limit",
+                    LIMBS * 32
+                );
+            }
+            std::process::exit(1);
+        });
     eprintln!("found {} edges", edges.len());
 
     let prefix = &cli.output;
@@ -127,7 +131,10 @@ fn main() {
     }
     eprintln!("wrote {}", fasta_out_path.display());
 
-    let contigs = assemble_contigs(&seq_refs, &edges);
+    let contigs = assemble_contigs(&seq_refs, &edges).unwrap_or_else(|e| {
+        eprintln!("error assembling contigs: {e}");
+        std::process::exit(1);
+    });
     if !contigs.is_empty() {
         let contigs_path = prefix.with_extension("contigs.fasta");
         let contigs_file = File::create(&contigs_path).unwrap_or_else(|e| {

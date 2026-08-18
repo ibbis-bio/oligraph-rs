@@ -1,0 +1,25 @@
+[package]
+name = "oligraph-py"
+version = "0.2.0"
+edition = "2024"
+description = "Python bindings for OliGraph"
+repository = "https://github.com/AgentK9/oligraph-rs"
+
+[lib]
+name = "_oligraph"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# default-features = false disables the `progress` feature: an indicatif bar and
+# stderr timings are unwanted noise in a notebook. The web crate does the same.
+oligraph-rs = { path = "../oligraph-rs", default-features = false }
+
+# `extension-module` is deliberately NOT enabled here; maturin supplies it via
+# [tool.maturin] features. Enabling it by default would break `cargo test` at the
+# workspace root with undefined Python symbols on Linux.
+pyo3 = { version = "0.29.2", features = ["abi3-py39"] }
+
+# flate2 only (pure-Rust miniz_oxide). needletail's default `compression` bundle
+# pulls in bzip2-sys/liblzma/zstd-sys, which would make a source install require
+# a C toolchain.
+needletail = { version = "0.7.3", default-features = false, features = ["flate2"] }
