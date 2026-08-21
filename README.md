@@ -10,6 +10,8 @@ Available as a CLI tool, a Python package, and a browser-based web app (all comp
 oligraph-rs -i <input.fasta> -o <output_prefix> [-l <min_overlap>] [-m <all|pca>]
 ```
 
+(There is also an `oligraph` command in the [Python package](#command-line), if you would rather not build the Rust binary.)
+
 | Flag | Description |
 |---|---|
 | `-i, --input` | Input FASTA file of oligonucleotide sequences |
@@ -73,6 +75,25 @@ To build from source instead (needs Rust 1.85 or later):
 ```sh
 pip install git+https://github.com/AgentK9/oligraph-rs
 ```
+
+### Command line
+
+Installing the package also provides an `oligraph` command (and `python -m oligraph`), so the tool is usable without a Rust toolchain:
+
+```sh
+oligraph -i pool.fasta.gz -o results -l 20 -m pca
+```
+
+Flags match the Rust CLI above, with these additions:
+
+| Flag | Description |
+|---|---|
+| `-o, --output` | Optional here — omit it to write the GFA to stdout |
+| `--on-invalid` | `skip` (default) drops unusable records and names them on stderr; `raise` fails |
+| `--positional-ids` | Label output with indices, reproducing the Rust CLI's output exactly |
+| `-q, --quiet` | Suppress progress on stderr |
+
+The one behavioural difference from `oligraph-rs`: output is labelled with FASTA record names by default rather than positional indices.
 
 ### Quick start
 

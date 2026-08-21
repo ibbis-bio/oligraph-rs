@@ -28,6 +28,11 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Bio-Informatics",
 ]
 
+# Console entry point. The Rust CLI binary cannot ship inside a pyo3 extension
+# wheel, so this is a Python front-end over the same bindings.
+[project.scripts]
+oligraph = "oligraph.__main__:main"
+
 [project.urls]
 Homepage = "https://github.com/AgentK9/oligraph-rs"
 Repository = "https://github.com/AgentK9/oligraph-rs"

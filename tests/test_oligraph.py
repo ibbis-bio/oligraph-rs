@@ -545,3 +545,99 @@ def test_output_matches_cli_byte_for_byte(tmp_path):
 def test_version_is_exposed():
     assert oligraph.__version__
     assert sys.version_info >= (3, 9)
+
+
+# ============================================================
+# Console entry point
+# ============================================================
+
+
+def _run_cli(args, **kw):
+    """Invoke the installed `oligraph` console script."""
+    return subprocess.run(
+        [shutil.which("oligraph") or "oligraph", *args],
+        capture_output=True,
+        text=True,
+        **kw,
+    )
+
+
+def test_console_script_is_installed():
+    assert shutil.which("oligraph"), "the `oligraph` entry point is not on PATH"
+
+
+def test_cli_version_matches_package():
+    r = _run_cli(["--version"])
+    assert r.returncode == 0
+    assert r.stdout.strip() == f"oligraph {oligraph.__version__}"
+
+
+def test_cli_writes_three_files(tmp_path):
+    prefix = tmp_path / "out"
+    r = _run_cli(["-i", str(POOL_FASTA), "-o", str(prefix), "-l", "20"])
+    assert r.returncode == 0, r.stderr
+
+    gfa = prefix.with_suffix(".gfa")
+    assert gfa.read_text() == oligraph.build_from_fasta(POOL_FASTA, min_overlap=20).to_gfa()
+    assert prefix.with_suffix(".fasta").exists()
+    assert prefix.with_suffix(".contigs.fasta").exists()
+    # Names, not indices, by default.
+    assert "S\toligo_0\t" in gfa.read_text()
+
+
+def test_cli_gfa_to_stdout_when_no_output_given():
+    r = _run_cli(["-i", str(POOL_FASTA), "-l", "20", "--quiet"])
+    assert r.returncode == 0, r.stderr
+    assert r.stdout == oligraph.build_from_fasta(POOL_FASTA, min_overlap=20).to_gfa()
+    assert r.stderr == ""
+
+
+def test_cli_positional_ids_matches_rust_cli_output(tmp_path):
+    """`--positional-ids` must reproduce the Rust CLI's labelling."""
+    prefix = tmp_path / "out"
+    r = _run_cli(
+        ["-i", str(POOL_FASTA), "-o", str(prefix), "-l", "20", "--positional-ids"]
+    )
+    assert r.returncode == 0, r.stderr
+    text = prefix.with_suffix(".gfa").read_text()
+    assert "S\t0\t" in text
+    assert "oligo_0" not in text
+
+
+def test_cli_creates_missing_output_directory(tmp_path):
+    prefix = tmp_path / "nested" / "deeper" / "out"
+    r = _run_cli(["-i", str(POOL_FASTA), "-o", str(prefix), "-l", "20"])
+    assert r.returncode == 0, r.stderr
+    assert prefix.with_suffix(".gfa").exists()
+
+
+def test_cli_reports_errors_without_a_traceback(tmp_path):
+    r = _run_cli(["-i", str(POOL_FASTA), "-l", "0"])
+    assert r.returncode == 1
+    assert "Traceback" not in r.stderr
+    assert "must be between 1 and 64" in r.stderr
+
+
+def test_cli_missing_file_is_a_clean_error(tmp_path):
+    r = _run_cli(["-i", str(tmp_path / "nope.fasta")])
+    assert r.returncode == 1
+    assert "Traceback" not in r.stderr
+    assert "error:" in r.stderr
+
+
+def test_cli_reports_skipped_records(tmp_path):
+    messy = tmp_path / "messy.fasta"
+    messy.write_text(">good\nACGTACGTACGTACGTACGTACGT\n>bad\nACGTNNNNACGTACGTACGTACGT\n")
+    r = _run_cli(["-i", str(messy), "-o", str(tmp_path / "out"), "-l", "6"])
+    assert r.returncode == 0, r.stderr
+    assert "skipped 1 unusable records: bad" in r.stderr
+
+
+def test_module_invocation_works():
+    r = subprocess.run(
+        [sys.executable, "-m", "oligraph", "--version"],
+        capture_output=True,
+        text=True,
+    )
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.strip() == f"oligraph {oligraph.__version__}"
