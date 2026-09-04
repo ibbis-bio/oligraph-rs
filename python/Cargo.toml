@@ -1,6 +1,6 @@
 [package]
 name = "oligraph-py"
-version = "0.2.0"
+version = "0.2.2"
 edition = "2024"
 description = "Python bindings for OliGraph"
 repository = "https://github.com/AgentK9/oligraph-rs"
