@@ -27,11 +27,27 @@ jobs:
         python: ["3.9", "3.13"]
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
-      - uses: Swatinem/rust-cache@v2
+
+      # The org's Actions allow-list permits only GitHub-owned actions, so drive
+      # rustup directly and cache with actions/cache instead of rust-cache.
+      - name: Install Rust
+        shell: bash
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - name: Cache cargo registry & build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-py${{ matrix.python }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-py${{ matrix.python }}-
 
       # Writer parity tests: the labelled writers must match the core writers
       # byte for byte. Linking the test binary needs a shared libpython, so point
@@ -154,7 +170,16 @@ jobs:
         with:
           path: dist
           merge-multiple: true
-      - uses: softprops/action-gh-release@v2
-        with:
-          files: dist/*
-          generate_release_notes: true
+      # gh instead of softprops/action-gh-release, which the org's allow-list
+      # permits only at v1. Upload-if-it-exists keeps the job idempotent across
+      # re-runs, as the action was.
+      - name: Attach artefacts to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" dist/* --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" dist/* --generate-notes --verify-tag
+          fi
